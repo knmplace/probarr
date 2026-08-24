@@ -1,0 +1,36 @@
+# --- Runtime output: may contain provider URLs with embedded credentials ---
+config/
+work/
+out/
+*.jsonl
+*.m3u
+*.m3u8
+contact-sheet*.html
+selection*.json
+
+# --- Secrets ---
+.env
+*.env
+!.env.example
+secrets.*
+*.pem
+*.key
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+deploy.sh
+
+# --- Personal reference files, never committed ---
+# For anything you want kept on disk for your own use (e.g. a real
+# provider-specific wantlist) without it ever being tracked or pushed.
+local/

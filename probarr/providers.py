@@ -1,0 +1,140 @@
+"""Saved provider connections.
+
+The thing probarr had no obvious home for at all: where do you tell it about
+your IPTV subscription? Wantlists and settings both had a visible page; the
+provider address had nowhere to live except a CLI flag or an unlabelled text
+box on the settings page that did nothing on its own.
+
+A provider is just a name plus a source spec (the same strings load_source()
+already accepts: a plain M3U URL, or xtream://user:pass@host:port, or
+dispatcharr://user:pass@host:port) -- saved so it can be picked from a list
+instead of retyped, and so credentials live in one place rather than pasted
+into every run.
+"""
+import os
+import re
+import time
+
+from .wantlist import safe_name  # identical constraint: becomes a filename
+
+STORE_FILE = "providers.json"
+
+
+def _path(root):
+    return os.path.join(root, STORE_FILE)
+
+
+def _scheme(spec):
+    m = re.match(r"^([a-z][a-z0-9+.-]*)://", spec or "", re.I)
+    if not m:
+        return "m3u"
+    s = m.group(1).lower()
+    return {"http": "m3u", "https": "m3u", "file": "m3u",
+            "xtreams": "xtream", "dispatcharrs": "dispatcharr"}.get(s, s)
+
+
+def list_all(root):
+    import json
+    try:
+        with open(_path(root), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    out = data if isinstance(data, list) else []
+    for p in out:
+        p["scheme"] = _scheme(p.get("spec", ""))
+    return out
+
+
+def get(root, name):
+    n = safe_name(name)
+    return next((p for p in list_all(root) if p["name"] == n), None)
+
+
+def save(root, name, spec, concurrency=None):
+    """`concurrency`: this provider's own probe connection limit, if it
+    differs from the global default in Settings -- e.g. a second provider
+    on a 3-connection plan sitting alongside the main one's 1-connection
+    limit. None means "use the global default", which is every provider's
+    behaviour before this existed.
+    """
+    import json
+    n = safe_name(name)
+    if not n:
+        raise ValueError("invalid provider name")
+    if not (spec or "").strip():
+        raise ValueError("spec cannot be empty")
+    items = [p for p in list_all(root) if p["name"] != n]
+    entry = {"name": n, "spec": spec.strip(), "saved": time.time()}
+    if concurrency:
+        entry["concurrency"] = max(1, int(concurrency))
+    items.append(entry)
+    items.sort(key=lambda p: p["name"].lower())
+    os.makedirs(root, exist_ok=True)
+    tmp = _path(root) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2)
+    os.replace(tmp, _path(root))
+    return n
+
+
+def set_last_group_name(root, name, group_name):
+    """Remember the Dispatcharr group a push into this provider last used.
+
+    Deliberately attached to the PROVIDER (the actual persistent Dispatcharr
+    destination), not to whichever probarr run happened to trigger the
+    push. Real bug this fixes: group-name memory was originally kept on the
+    run instead, so a channel re-pushed from a DIFFERENT, newer probarr run
+    of the same conceptual lineup (re-verifying the same channels a
+    second time, say) had no memory of the group the FIRST run's push had
+    used, and defaulted to a brand new group instead -- even though from
+    the operator's perspective there is only one real destination, "my
+    lineup in Dispatcharr", regardless of which run produced today's picks.
+    """
+    import json
+    n = safe_name(name)
+    try:
+        with open(_path(root), encoding="utf-8") as f:
+            items = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(items, list):
+        return False
+    for p in items:
+        if p.get("name") == n:
+            p["last_group_name"] = group_name
+            break
+    else:
+        return False
+    os.makedirs(root, exist_ok=True)
+    tmp = _path(root) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2)
+    os.replace(tmp, _path(root))
+    return True
+
+
+def delete(root, name):
+    import json
+    n = safe_name(name)
+    items = list_all(root)
+    kept = [p for p in items if p["name"] != n]
+    if len(kept) == len(items):
+        return False
+    os.makedirs(root, exist_ok=True)
+    tmp = _path(root) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(kept, f, indent=2)
+    os.replace(tmp, _path(root))
+    return True
+
+
+def redact(spec):
+    """Spec safe to display in a list view -- never the raw credentials."""
+    spec = spec or ""
+    # user:pass@host style (xtream://, dispatcharr://)
+    spec = re.sub(r"(?i)^([a-z]+://)[^:/@]+:[^@]+@", r"\1***:***@", spec)
+    # query-string credentials on a plain M3U/Xtream URL
+    spec = re.sub(r"(?i)([?&](?:username|password|user|pass|u|p|token|key)=)[^&]*",
+                  r"\1***", spec)
+    return spec

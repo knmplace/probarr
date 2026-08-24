@@ -1,0 +1,23 @@
+# UK Free-to-Air (Freeview) wantlist
+#
+# The 12 channels probarr's own README/demo runs are built against --
+# BBC, S4C, Bloomberg, QVC. Verified end-to-end this session: real
+# BBC pips-CDN / S4C-CDN stream URLs, probed clean, curated, and exported
+# into a live Dispatcharr instance from a genuine blank-slate rebuild.
+#
+# Numbers are grouped by genre band (entertainment 100s, kids 600s,
+# shopping 150) so a second wantlist using the same convention can be
+# imported alongside this one into the same lineup without collisions.
+
+101: BBC One
+102: BBC Two
+103: BBC Three
+104: BBC Four
+105: BBC Parliament
+106: BBC Scotland
+107: BBC Alba
+120: CBBC
+121: CBeebies
+130: S4C
+140: Bloomberg TV
+150: QVC UK

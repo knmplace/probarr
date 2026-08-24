@@ -1,0 +1,205 @@
+"""XMLTV guide loading and "what should be on right now" lookup.
+
+The point of this module is a check no probe can perform: whether the picture
+arriving is the programme the guide claims. A stream can be alive, clean,
+high-bitrate and completely wrong -- the guide says one film and a different
+film is playing. That fault is invisible to every automated test and obvious
+to a person looking at a thumbnail with the expected title printed under it.
+
+Two details matter:
+
+1. The expected programme is resolved **at probe time**, not at viewing time,
+   and stored alongside the frame. A contact sheet opened the next morning
+   must show what was supposed to be on when the frame was grabbed, not what
+   is on now, or the comparison is meaningless.
+
+2. Channel ids rarely line up. A playlist may use tvg-id "1" while the guide
+   uses "BBC.One.Lon.HD.uk". So matching falls back to display names through
+   the same normaliser used for stream matching.
+"""
+import datetime
+import gzip
+import io
+import re
+import urllib.request
+import xml.etree.ElementTree as ET
+
+_TIME_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})?\s*([+-]\d{4})?")
+
+
+def parse_xmltv_time(value):
+    """'20260821080000 +0000' -> aware datetime. None if unparseable."""
+    if not value:
+        return None
+    m = _TIME_RE.match(value.strip())
+    if not m:
+        return None
+    y, mo, d, h, mi, se, off = m.groups()
+    try:
+        dt = datetime.datetime(int(y), int(mo), int(d), int(h), int(mi), int(se or 0))
+    except ValueError:
+        return None
+    if off:
+        sign = 1 if off[0] == "+" else -1
+        delta = datetime.timedelta(hours=int(off[1:3]), minutes=int(off[3:5]))
+        return dt.replace(tzinfo=datetime.timezone(sign * delta))
+    return dt.replace(tzinfo=datetime.timezone.utc)
+
+
+def _open(source, timeout=120):
+    """Open a local path or URL, transparently decompressing gzip.
+
+    Detects gzip by magic bytes rather than by '.gz' in the name: these
+    aggregator URLs frequently serve gzip from an extensionless path, and
+    content-encoding is not reliable either.
+    """
+    if re.match(r"^https?://", source, re.I):
+        req = urllib.request.Request(source, headers={"User-Agent": "probarr/0.1",
+                                                      "Accept-Encoding": "gzip"})
+        raw = urllib.request.urlopen(req, timeout=timeout).read()
+    else:
+        with open(source, "rb") as f:
+            raw = f.read()
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    return io.BytesIO(raw)
+
+
+class Guide:
+    """An XMLTV guide, indexed for lookup by channel id or display name."""
+
+    def __init__(self):
+        self.display_names = {}   # channel_id -> [names]
+        self.programmes = {}      # channel_id -> [(start, stop, title, desc)]
+        self._by_key = {}         # normalised name -> channel_id
+
+    # -- loading ------------------------------------------------------------
+    @classmethod
+    def load(cls, source, window_hours=48, at=None, timeout=120):
+        """Parse an XMLTV file or URL.
+
+        Only programmes within +/- window_hours of `at` are retained. These
+        aggregated guides carry a fortnight of listings for thousands of
+        channels; keeping all of it would cost hundreds of MB to answer a
+        question about one afternoon.
+        """
+        at = at or datetime.datetime.now(datetime.timezone.utc)
+        lo = at - datetime.timedelta(hours=window_hours)
+        hi = at + datetime.timedelta(hours=window_hours)
+
+        g = cls()
+        stream = _open(source, timeout=timeout)
+        # iterparse + clear(): the document is streamed and each element
+        # discarded once consumed, so peak memory stays flat regardless of
+        # file size.
+        for event, elem in ET.iterparse(stream, events=("end",)):
+            tag = elem.tag.lower()
+            if tag == "channel":
+                cid = elem.get("id") or ""
+                names = [(e.text or "").strip()
+                         for e in elem.findall("display-name") if (e.text or "").strip()]
+                if cid and names:
+                    g.display_names.setdefault(cid, []).extend(names)
+                elem.clear()
+            elif tag == "programme":
+                start = parse_xmltv_time(elem.get("start"))
+                stop = parse_xmltv_time(elem.get("stop"))
+                if start and (lo <= start <= hi or (stop and lo <= stop <= hi)):
+                    cid = elem.get("channel") or ""
+                    title_el = elem.find("title")
+                    desc_el = elem.find("desc")
+                    g.programmes.setdefault(cid, []).append((
+                        start, stop,
+                        (title_el.text or "").strip() if title_el is not None else "",
+                        (desc_el.text or "").strip() if desc_el is not None else "",
+                    ))
+                elem.clear()
+        for cid in g.programmes:
+            g.programmes[cid].sort(key=lambda p: p[0])
+        return g
+
+    # -- indexing -----------------------------------------------------------
+    def build_name_index(self, normalizer):
+        """Index display names through the same normaliser used for streams."""
+        self._by_key = {}
+        for cid, names in self.display_names.items():
+            for n in names:
+                k = normalizer.key(n)
+                if k:
+                    self._by_key.setdefault(k, cid)
+        return self
+
+    MIN_FUZZY_LEN = 6
+
+    def resolve(self, tvg_id=None, name=None, normalizer=None, fuzzy=True):
+        """Find the guide's channel id for a stream. None when unmatched.
+
+        Falls back to prefix matching because guides and playlists abbreviate
+        differently -- a guide's "BBC One Lon HD" is a playlist's "BBC One
+        London", and "Bloomberg HD" is "Bloomberg TV".
+
+        Ambiguity is refused rather than guessed. A bare "BBC One" is a prefix
+        of seventeen regional variants in a UK guide, and attaching the wrong
+        region's listings to a channel is worse than showing none: it would
+        make the picture look like it disagreed with the schedule when the
+        schedule was simply the wrong one.
+        """
+        if tvg_id and (tvg_id in self.programmes or tvg_id in self.display_names):
+            return tvg_id
+        if not (name and normalizer):
+            return None
+        key = normalizer.key(name)
+        if not key:
+            return None
+        hit = self._by_key.get(key)
+        if hit or not fuzzy or len(key) < self.MIN_FUZZY_LEN:
+            return hit
+        cands = [k for k in self._by_key
+                 if len(k) >= self.MIN_FUZZY_LEN and (k.startswith(key) or key.startswith(k))]
+        if len(cands) != 1:
+            return None
+        return self._by_key[cands[0]]
+
+    def search(self, query, limit=25):
+        """Every channel whose display name contains `query` (substring,
+        case-insensitive) -- for a person to browse when the automatic
+        resolve() either found nothing or, worse, found the wrong entry
+        while still returning a plausible-looking programme. A human
+        scanning a short list of real names beats trusting a fuzzy-match
+        algorithm on a channel that turned out to be filed under an odd
+        or unexpected name.
+        """
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        out = []
+        for cid, names in self.display_names.items():
+            hit = next((n for n in names if q in n.lower()), None)
+            if hit:
+                out.append((cid, hit))
+                if len(out) >= limit:
+                    break
+        return out
+
+    # -- lookup -------------------------------------------------------------
+    def now_playing(self, channel_id, at):
+        """The programme scheduled on `channel_id` at `at`. None if unknown."""
+        if not channel_id:
+            return None
+        for start, stop, title, desc in self.programmes.get(channel_id, ()):
+            if start <= at and (stop is None or at < stop):
+                return {
+                    "title": title,
+                    "desc": desc,
+                    "start": start.isoformat(),
+                    "stop": stop.isoformat() if stop else None,
+                    "window": f"{start.astimezone().strftime('%H:%M')}"
+                              f"-{stop.astimezone().strftime('%H:%M')}" if stop else
+                              start.astimezone().strftime('%H:%M'),
+                }
+        return None
+
+    def stats(self):
+        return {"channels": len(self.display_names),
+                "with_programmes": len(self.programmes),
+                "programmes": sum(len(v) for v in self.programmes.values())}

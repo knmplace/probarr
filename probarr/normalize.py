@@ -1,0 +1,327 @@
+"""Channel-name normalisation and candidate grouping.
+
+The core problem: a provider lists the same channel dozens of times under
+cosmetically different names --
+
+    UK: Meridian Sports 1
+    UKFHD | Meridian Sports 1
+    UKUHD: Meridian Sports 1 UHD
+    UK 4K Meridian Sports 1
+    HEVC FHD Meridian Sports 1
+    Meridian Sports 1 HD [Multi-Audio]
+
+-- and all of them are candidates for one logical channel.
+
+This module is deliberately data-driven rather than hardcoded to one
+provider's conventions. A regex that was too narrow ('^UK:' only) once hid a
+genuine 4K feed that had been in the catalogue the whole time, so the tag
+vocabulary lives in one editable place and `explain()` exists to show exactly
+what got stripped.
+"""
+import re
+import unicodedata
+
+# Quality / format / delivery tags. Stripped wherever they appear, because
+# they describe the *encode*, not the channel identity. Probing measures the
+# real resolution anyway -- these labels are frequently lies.
+QUALITY_TAGS = [
+    "UHD", "FHD", "QHD", "HD", "SD", "4K", "8K", "1080P", "1080I", "720P",
+    "576P", "480P", "2160P", "HEVC", "H265", "H264", "X265", "X264", "AVC",
+    "MPEG2", "RAW", "LQ", "HQ", "MULTIAUDIO", "MULTI", "BACKUP", "ALT",
+    "VIP", "PLUS", "PREMIUM", "SOURCE", "FEED", "TEST",
+]
+
+# Country / region markers. Present as a prefix on most providers' listings.
+# Kept as a set so a source can be restricted to one region without the
+# regex-authoring mistake that caused the original bug.
+DEFAULT_REGION_TAGS = [
+    "UK", "GB", "IE", "US", "USA", "CA", "AU", "NZ", "DE", "FR", "ES", "IT",
+    "NL", "PT", "PL", "SE", "NO", "DK", "FI", "TR", "IN", "PK", "AR", "BR",
+    "MX", "ZA", "EX", "EXYU", "AF", "ASIA", "LATINO", "ARB", "INT",
+]
+
+# Separators a provider might use between the tag block and the real name.
+_SEP = r"[\s:|/\-–—\.]"
+
+
+def _fold(s: str) -> str:
+    """Uppercase, strip accents, drop anything that isn't alphanumeric."""
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.upper().replace("&", " AND ")
+    return re.sub(r"[^A-Z0-9]+", "", s)
+
+
+class Normalizer:
+    """Turns a raw stream title into a stable matching key.
+
+    region_tags=None means 'accept any region'. Pass an explicit list to
+    restrict matching to one country -- important because loose prefix
+    matching across a multi-country catalogue produces real false positives
+    (a channel called 'W' once matched a Ukrainian channel because 'UKRAINE'
+    starts with 'UK').
+    """
+
+    def __init__(self, region_tags=None, quality_tags=None, aliases=None,
+                 drop_timeshift=True):
+        self.region_tags = list(region_tags) if region_tags else list(DEFAULT_REGION_TAGS)
+        self.quality_tags = list(quality_tags) if quality_tags else list(QUALITY_TAGS)
+        self.aliases = {_fold(k): v for k, v in (aliases or {}).items()}
+        self.drop_timeshift = drop_timeshift
+
+        tagset = sorted(set(self.region_tags + self.quality_tags), key=len, reverse=True)
+        alt = "|".join(re.escape(t) for t in tagset)
+        # A leading run of tag tokens, in any order, optionally glued together
+        # with no separator at all ("UKFHD", "UKUHD"), but the run as a whole
+        # MUST terminate on a separator or end-of-string.
+        #
+        # That trailing requirement is load-bearing, not tidiness: without it
+        # "UKRAINE: Futbol 1" matches the tag "UK", reports region UK, and
+        # yields the key "RAINEFUTBOL1" -- a real cross-country false positive
+        # of exactly the kind that puts a Ukrainian feed on a British channel.
+        self._prefix_re = re.compile(
+            rf"^(?:(?:{alt}){_SEP}*)*(?:{alt})(?:{_SEP}+|$)", re.IGNORECASE)
+        # The same tokens appearing as standalone words anywhere else.
+        self._inline_re = re.compile(rf"(?<![A-Za-z0-9])(?:{alt})(?![A-Za-z0-9])",
+                                     re.IGNORECASE)
+        self._bracket_re = re.compile(r"[\(\[\{][^\)\]\}]*[\)\]\}]")
+        self._timeshift_re = re.compile(r"(?<![A-Za-z0-9])[+\-]\s?\d{1,2}\s?(H|HR|HRS)?(?![A-Za-z0-9])",
+                                        re.IGNORECASE)
+
+    def is_timeshift(self, name: str) -> bool:
+        """True for '+1' style catch-up variants, which are a different channel."""
+        return bool(self._timeshift_re.search(name))
+
+    def region_of(self, name: str):
+        """The region this title is marked with, if any. None when unmarked.
+
+        Unmarked titles are common and legitimate ('HEVC FHD Meridian Sports 1'
+        carries no country marker at all), so callers should decide whether to
+        include them rather than have the matcher silently drop them.
+
+        Two conventions, checked in order:
+
+        1. A leading UK:/UKHD:/etc prefix (the common case).
+        2. A 2-3 letter country code inside a bracketed segment anywhere in
+           the name -- '(Claro) (CO) Cartoon Network', '(IT) (DZ) Discovery'.
+           Real, evidenced case: a reseller brand like "Claro" or "DirecTV
+           GO" is not itself a country, so the ONLY place the actual country
+           lives is this bracket code -- the plain UK:-prefix check finds
+           nothing and would otherwise let a Latin-American feed through as
+           "unmarked".
+
+        This is deliberately the single authoritative answer for a name --
+        group_candidates() only falls back to the group-title field when
+        THIS returns None, never to override it. Confirmed against real
+        data: a genuinely UK:-prefixed stream can sit in an oddly-named group
+        ('UK: TLC' filed under 'Discovery Plus'), and the explicit name
+        marker should win, not get second-guessed by the group.
+        """
+        head = self._prefix_re.match(name)
+        if head:
+            folded = _fold(head.group(0))
+            for tag in sorted(self.region_tags, key=len, reverse=True):
+                if folded.startswith(_fold(tag)):
+                    return tag.upper()
+        for bracket in self._bracket_re.findall(name):
+            code = re.sub(r"[^A-Za-z]", "", bracket).upper()
+            if code in _BRACKET_COUNTRY_CODES:
+                return _BRACKET_COUNTRY_CODES[code]
+        return None
+
+    def key(self, name: str) -> str:
+        """The matching key: identity only, all packaging stripped."""
+        s = name
+        # A '+1' channel is a genuinely different channel, not a variant of the
+        # same one, so it gets its own key rather than being stripped. Rewrite
+        # the marker to a word so "Meridian Sports 1 +1" cannot collide with a
+        # hypothetical "Meridian Sports 1 1".
+        s = self._timeshift_re.sub(lambda m: " TIMESHIFT" + re.sub(r"\D", "", m.group(0)) + " ", s)
+        s = self._prefix_re.sub(" ", s)
+        s = self._bracket_re.sub(" ", s)
+        s = self._inline_re.sub(" ", s)
+        folded = _fold(s)
+        return self.aliases.get(folded, folded)
+
+    def explain(self, name: str) -> dict:
+        """Show what normalisation did to a title. Used by `probarr explain`.
+
+        Exists because the failure mode here is silent: a too-narrow rule
+        doesn't error, it just quietly yields fewer candidates.
+        """
+        return {
+            "raw": name,
+            "region": self.region_of(name),
+            "prefix_stripped": (m.group(0) if (m := self._prefix_re.match(name)) else ""),
+            "timeshift": self.is_timeshift(name),
+            "key": self.key(name),
+        }
+
+
+# Full-form country/region names as seen in real M3U group-title fields --
+# a genuinely common, separate convention from the UK:/UKHD: name-prefix
+# style Normalizer.region_of() already handles. Found for real: a
+# multi-country provider whose foreign entries carried NO region marker in
+# the name at all (often wrapped in brackets probarr already strips as
+# decoration, e.g. "(PT) (Meo) TLC"), but a reliable full country name in
+# group-title ("Portugal", "Poland", "Russia", "Austria", "Romania"...).
+# Checking name alone let every one of those through as "unmarked" once
+# --regions UK was applied, and a generically-named channel like "TLC"
+# collapsed 23 different countries' TLC feeds into one candidate pool.
+#
+# Deliberately NOT exhaustive -- a provider using a platform/reseller brand
+# as its group ("CLARO", "DirecTV GO") rather than a country name will not
+# be caught by this, and that is a real, stated limitation, not a bug: no
+# list can cover every provider's group-title convention. The contact
+# sheet's frame is still the actual backstop for whatever slips through.
+_LONG_REGION_NAMES = {
+    "UNITED KINGDOM": "UK", "UK ENTERTAINMENT": "UK", "GREAT BRITAIN": "UK",
+    "UNITED STATES": "US", "US ENTERTAINMENT": "US", "USA ENTERTAINMENT": "US",
+    "PORTUGAL": "PT", "POLAND": "PL", "AUSTRIA": "AT", "ROMANIA": "RO",
+    "MEXICO": "MX", "ARGENTINA": "AR", "VIETNAM": "VT", "RUSSIA": "RU",
+    "GERMANY": "DE", "FRANCE": "FR", "SPAIN": "ES", "ITALY": "IT",
+    "NETHERLANDS": "NL", "SWEDEN": "SE", "NORWAY": "NO", "DENMARK": "DK",
+    "FINLAND": "FI", "TURKEY": "TR", "INDIA": "IN", "PAKISTAN": "PK",
+    "BRAZIL": "BR", "SOUTH AFRICA": "ZA", "CANADA": "CA", "AUSTRALIA": "AU",
+    "NEW ZEALAND": "NZ", "LATINO": "LATINO", "ASIA": "ASIA", "ARABIC": "ARB",
+    "CHILE": "CL",
+}
+# Sorted longest-first so "NEW ZEALAND" is tried before a shorter accidental
+# substring match, and so multi-word names match correctly as whole words.
+_LONG_REGION_NAMES_SORTED = sorted(_LONG_REGION_NAMES, key=len, reverse=True)
+
+# Reseller/platform brands that are themselves not a country name but are, in
+# practice, exclusively used for one region's catalogue. Evidenced case: group
+# titles like "CLARO" and "DirecTV GO" carry no country name at all (Claro and
+# DirecTV GO are Latin-America-only platforms), so a channel filed under them
+# with no other marker would otherwise pass through --regions UK as
+# "unmarked". Deliberately NOT extended to brands with genuine UK presence
+# ("SamsungTV", "PLEX") -- those really are multi-region and would produce
+# false rejections.
+_PLATFORM_BRAND_REGIONS = {
+    "CLARO": "LATINO",
+    "DIRECTV GO": "LATINO",
+    "DIRECTVGO": "LATINO",
+}
+
+# 2-3 letter country codes as seen inside bracketed segments of a channel
+# name, e.g. "(CO) Cartoon Network", "(Claro) (AR) TLC". A separate, real
+# convention from both the name-prefix and the group-title conventions above
+# -- evidenced directly from labeled examples where the ONLY country signal
+# anywhere on the stream was this bracket code.
+_BRACKET_COUNTRY_CODES = {
+    "UK": "UK", "GB": "UK", "US": "US", "USA": "US", "CA": "CA", "MX": "MX",
+    "AR": "AR", "BR": "BR", "CO": "CO", "CL": "CL", "PE": "PE", "EC": "EC",
+    "VE": "VE", "PA": "PA", "UY": "UY", "PY": "PY", "BO": "BO", "DO": "DO",
+    "PT": "PT", "ES": "ES", "IT": "IT", "FR": "FR", "DE": "DE", "NL": "NL",
+    "PL": "PL", "AT": "AT", "RO": "RO", "RU": "RU", "SE": "SE", "NO": "NO",
+    "DK": "DK", "FI": "FI", "TR": "TR", "IN": "IN", "PK": "PK", "ZA": "ZA",
+    "AU": "AU", "NZ": "NZ", "DZ": "DZ",
+}
+
+
+def group_of(group_title):
+    """Region implied by an M3U group-title.
+
+    Complements Normalizer.region_of() (name-prefix / bracket-code based)
+    with the other common convention: the group-title field naming the
+    country (or a country-exclusive platform brand), independent of whatever
+    the channel name itself says.
+
+    Uses substring matching, not an exact whole-title match -- real group
+    titles embed the country name inside a longer string ("Meridian New Zealand",
+    "US Sports", "US Locals & Regional", "CA Amazon Prime Linear"), so an
+    exact-match check silently missed all of these.
+    """
+    if not group_title:
+        return None
+    folded = re.sub(r"[^A-Z ]", "", group_title.upper()).strip()
+    if not folded:
+        return None
+    for name in _LONG_REGION_NAMES_SORTED:
+        if re.search(rf"(?<![A-Z]){re.escape(name)}(?![A-Z])", folded):
+            return _LONG_REGION_NAMES[name]
+    for brand, region in _PLATFORM_BRAND_REGIONS.items():
+        if brand in folded:
+            return region
+    # Short 2-3 letter country code as a leading standalone word, e.g.
+    # "US Sports", "US Locals & Regional", "CA Amazon Prime Linear" -- real
+    # group-title convention distinct from the full-name one above.
+    first_word = folded.split(" ", 1)[0]
+    if first_word in _BRACKET_COUNTRY_CODES:
+        return _BRACKET_COUNTRY_CODES[first_word]
+    return None
+
+
+def group_candidates(streams, normalizer, include_timeshift=False,
+                     regions=None, include_unmarked=True):
+    """Bucket streams into {key: [stream, ...]} candidate pools.
+
+    regions: restrict to these region tags (list of upper-case strings).
+    include_unmarked: also keep streams carrying no region marker at all.
+    """
+    pools = {}
+    for s in streams:
+        name = s.name
+        if not include_timeshift and normalizer.is_timeshift(name):
+            continue
+        if regions is not None:
+            r = normalizer.region_of(name)
+            # The name-based marker is authoritative when present: an
+            # explicit "UK:" prefix (or bracket country code) on the name
+            # wins even if the group-title looks like a different or
+            # confusing region ("UK: TLC" filed under group "Discovery
+            # Plus" must not be rejected just because "Discovery Plus"
+            # carries no recognisable country). Only fall back to the
+            # group-title signal when the name gives no signal at all.
+            if r is not None:
+                if r not in regions:
+                    continue
+            else:
+                g = group_of(getattr(s, "group", ""))
+                if g is not None:
+                    if g not in regions:
+                        continue
+                elif not include_unmarked:
+                    continue
+        k = normalizer.key(name)
+        if not k:
+            continue
+        pools.setdefault(k, []).append(s)
+    return pools
+
+
+# Coarse best-declared-first ordering, used to decide which candidates to
+# probe FIRST -- not a quality verdict. Declared labels are frequently wrong
+# about identity (the whole reason this tool probes at all), but as a
+# pre-probe ordering hint they beat the M3U file's arbitrary listing order,
+# and trying the plausibly-best candidate first means an adaptive probe run
+# can often stop after 2 tries instead of working through a whole pool.
+# Declared bitrate is deliberately not part of this: it is almost never
+# present in a stream's NAME (only occasionally in metadata, which requires
+# actually connecting to read -- see probe.py's probe_metadata()), so there
+# is no free pre-probe bitrate signal to rank on the way there is for
+# resolution tags.
+_DECLARED_QUALITY_RANK = {
+    "8K": 100, "4320P": 100,
+    "UHD": 90, "4K": 90, "2160P": 90,
+    "QHD": 70, "1440P": 70,
+    "FHD": 60, "1080P": 60, "1080I": 55,
+    "HD": 40, "720P": 40,
+    "SD": 10, "576P": 10, "480P": 8,
+}
+_DECLARED_QUALITY_RE = re.compile(
+    r"(?<![A-Z0-9])(" + "|".join(_DECLARED_QUALITY_RANK) + r")(?![A-Z0-9])")
+
+
+def declared_quality_rank(name: str) -> int:
+    """Best-effort pre-probe ordering score from the name's own quality tags.
+    Higher is "plausibly better". 0 for a name with no recognisable tag --
+    sorts after anything labelled, but stably (Python's sort is stable, so
+    unlabelled candidates keep their original relative order among themselves).
+    """
+    if not name:
+        return 0
+    folded = name.upper()
+    hits = _DECLARED_QUALITY_RE.findall(folded)
+    return max((_DECLARED_QUALITY_RANK[h] for h in hits), default=0)

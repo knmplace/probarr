@@ -1,0 +1,46 @@
+name: Publish Docker image
+
+# Building it yourself (see README) is the supported path -- this workflow is
+# an opt-in convenience for anyone who forks the repo and enables Actions,
+# not a requirement. It needs no secrets: GITHUB_TOKEN already has permission
+# to push to the repo's own ghcr.io namespace.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: tags
+        run: |
+          IMAGE="ghcr.io/${{ github.repository }}"
+          IMAGE="${IMAGE,,}"  # ghcr.io requires lowercase
+          TAGS="$IMAGE:latest"
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            TAGS="$TAGS,$IMAGE:$VERSION"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
