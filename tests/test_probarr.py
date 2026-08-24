@@ -49,6 +49,16 @@ class TestNormalize(unittest.TestCase):
         self.assertNotEqual(self.n.region_of("UKRAINE: Futbol 1"), "UK")
         self.assertIn("RAINE", self.n.key("UKRAINE: Futbol 1"))
 
+    def test_trailing_country_tag_is_also_detected(self):
+        # Region tags aren't always a leading prefix -- some providers put
+        # the country at the END of the name instead ("Cartoon Network | US").
+        self.assertEqual(self.n.region_of("Cartoon Network | US"), "US")
+        self.assertEqual(self.n.region_of("Discovery HD - UK"), "UK")
+        # Must not fire on a bare substring with no separator boundary --
+        # the same class of false positive test_ukraine_is_not_uk guards
+        # against on the prefix side.
+        self.assertIsNone(self.n.region_of("Futbol Ukraine"))
+
     def test_timeshift_is_a_different_channel(self):
         # The guarantee is that a +1 never lands in the base channel's pool,
         # whichever way the provider spells it.

@@ -81,6 +81,15 @@ class Normalizer:
         # of exactly the kind that puts a Ukrainian feed on a British channel.
         self._prefix_re = re.compile(
             rf"^(?:(?:{alt}){_SEP}*)*(?:{alt})(?:{_SEP}+|$)", re.IGNORECASE)
+        # The same convention, trailing instead of leading -- "Cartoon
+        # Network | US", "Discovery HD - UK". Idea from Lineuparr (another
+        # open-source Dispatcharr tool): its region tagging covers both ends
+        # of the name, not just the front. Requires a LEADING separator
+        # before the tag run, the mirror of the prefix pattern's trailing
+        # one, for the same reason -- without it "...Ukraine" would present
+        # a bare "UK" substring with no boundary to refuse it on.
+        self._suffix_re = re.compile(
+            rf"(?:{_SEP}+(?:{alt}))+$", re.IGNORECASE)
         # The same tokens appearing as standalone words anywhere else.
         self._inline_re = re.compile(rf"(?<![A-Za-z0-9])(?:{alt})(?![A-Za-z0-9])",
                                      re.IGNORECASE)
@@ -122,6 +131,12 @@ class Normalizer:
             folded = _fold(head.group(0))
             for tag in sorted(self.region_tags, key=len, reverse=True):
                 if folded.startswith(_fold(tag)):
+                    return tag.upper()
+        tail = self._suffix_re.search(name)
+        if tail:
+            folded = _fold(tail.group(0))
+            for tag in sorted(self.region_tags, key=len, reverse=True):
+                if folded.endswith(_fold(tag)):
                     return tag.upper()
         for bracket in self._bracket_re.findall(name):
             code = re.sub(r"[^A-Za-z]", "", bracket).upper()
