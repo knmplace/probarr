@@ -55,7 +55,7 @@ def start_run(root, source, run_id=None, wantlist=None, epg=None,
                    sample_seconds, frame_height, thumb_height, max_candidates,
                    min_candidates, only_channels, limit_channels, resume,
                    log, progress_cb, should_stop, clean_target, lineup,
-                   prioritise, budget_seconds)
+                   prioritise, budget_seconds, gate)
     except Exception as e:
         store.write_meta({**store.read_meta(), "run_state": "error",
                           "error": str(e)[:500], "finished": time.time()})
@@ -181,7 +181,7 @@ def _run(store, root, source, wantlist, epg, regions, strict_region, region_tags
          aliases, concurrency, gap_seconds, sample_seconds, frame_height,
          thumb_height, max_candidates, min_candidates, only_channels,
          limit_channels, resume, log, progress_cb, should_stop, clean_target=2,
-         lineup=None, prioritise=False, budget_seconds=None):
+         lineup=None, prioritise=False, budget_seconds=None, gate=None):
     norm = Normalizer(region_tags=region_tags, aliases=aliases or {})
 
     log(f"loading source: {source.split('?')[0]}")
