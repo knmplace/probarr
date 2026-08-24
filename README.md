@@ -10,6 +10,10 @@ make the final call.
 
 Provider-agnostic: any M3U or Xtream source in; M3U or Dispatcharr out.
 
+![Curating a channel: ranked candidates with real thumbnails, corruption counts and a live EPG comparison](docs/screenshots/curate.jpg)
+
+![Groups view: drag channels between groups, reorder within a group without disturbing anything else's numbering](docs/screenshots/groups.jpg)
+
 ## Why another stream checker
 
 There are many playlist checkers. They answer *"is this URL alive?"*. probarr
