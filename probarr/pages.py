@@ -66,6 +66,10 @@ __TOPBAR__
       <span class="muted" id="fileinfo"></span>
     </div>
     <div class="row" style="margin-top:8px">
+      <select id="starterselect" style="width:auto"><option value="">Load a starter lineup&hellip;</option></select>
+      <span class="muted">Real channel numbering, ready to import &mdash; free-to-air only for now.</span>
+    </div>
+    <div class="row" style="margin-top:8px">
       <a href="/browse"><button>Browse a provider's channels instead</button></a>
       <span class="muted">no typing, no probing &mdash; tick names from what your provider actually lists</span>
     </div>
@@ -142,6 +146,20 @@ $("loadtpl").addEventListener("click", async ()=>{
   const r = await fetch("/wantlists/template.txt");
   $("text").value = await r.text();
   if(!$("name").value) $("name").value = "my-lineup";
+  preview();
+});
+(async ()=>{
+  const d = await (await fetch("/api/wantlists/starters")).json();
+  $("starterselect").innerHTML = '<option value="">Load a starter lineup&hellip;</option>' +
+    d.starters.map(s => '<option value="'+esc(s.name)+'">'+esc(s.label)+'</option>').join("");
+})();
+$("starterselect").addEventListener("change", async ()=>{
+  const name = $("starterselect").value;
+  if(!name) return;
+  const r = await fetch("/wantlists/starter/"+encodeURIComponent(name)+".txt");
+  $("text").value = await r.text();
+  if(!$("name").value) $("name").value = name;
+  $("starterselect").value = "";
   preview();
 });
 $("save").addEventListener("click", async ()=>{

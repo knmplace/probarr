@@ -172,6 +172,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(pages.wantlist_page())
         if path == "/wantlists/template.txt":
             return self._send(wl.TEMPLATE, "text/plain; charset=utf-8")
+        if path == "/api/wantlists/starters":
+            return self._send(json.dumps({"starters": wl.list_starters()}),
+                              "application/json")
+        if path.startswith("/wantlists/starter/") and path.endswith(".txt"):
+            name = path[len("/wantlists/starter/"):-len(".txt")]
+            text = wl.get_starter(name)
+            if text is None:
+                return self._send("<h1>404</h1>", code=404)
+            return self._send(text, "text/plain; charset=utf-8")
         if path == "/providers":
             return self._send(pages.providers_page())
         if path == "/api/providers":

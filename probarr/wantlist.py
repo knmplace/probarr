@@ -81,6 +81,76 @@ TEMPLATE = """# probarr wantlist
 """
 
 
+# Starter lineups: ready-to-import wantlists for real, well-known channel
+# groupings, so a brand new lineup doesn't start from a blank textarea.
+#
+# Deliberately UK free-to-air ONLY for now -- numbers and names of channels
+# that are already broadcast unencrypted, openly and for free, compiled from
+# each broadcaster's own public channel listing. No streams, no logos, no
+# provider details, nothing that came from any specific IPTV source. The
+# equivalent for a subscription/branded lineup (Sky, DIRECTV and similar,
+# which other open-source Dispatcharr tools do ship) is deliberately left
+# out here for now -- a judgement call, not a technical limitation, kept
+# separate so it can be revisited on its own later.
+_STARTER_DISCLAIMER = """\
+# This is a NUMBERING TEMPLATE, not a stream source -- it names channels and
+# suggests channel numbers, nothing else. It carries no stream URLs, no
+# logos, no EPG data and no provider details of any kind; probarr still
+# matches every line here against whatever source you point it at
+# separately.
+#
+# You are responsible for only ever pointing this at content you have the
+# legal right to receive -- for UK free-to-air TV that generally means
+# being in the UK and covered by a valid TV Licence where one is required.
+# Nothing here is legal advice; if you are unsure, check before using it.
+"""
+
+STARTER_LINEUPS = {
+    "uk-freeview": {
+        "label": "UK Freeview (free-to-air)",
+        # Deliberately just the 12 channels this project's own README/demo
+        # runs already verify end-to-end (real BBC pips-CDN / S4C-CDN
+        # stream URLs, probed clean, curated, exported into a live
+        # Dispatcharr instance) -- not an attempt at a complete Freeview
+        # lineup. Extending this to more channels means verifying each one
+        # the same way first, not just listing names that sound plausible.
+        "text": _STARTER_DISCLAIMER + """#
+# The 12 channels this project's own demo runs are built against and have
+# verified end-to-end. Numbers are grouped by genre band (entertainment
+# 100s, kids 600s, shopping 150) so a second wantlist using the same
+# convention can be imported alongside this one without collisions.
+
+[Entertainment]
+101: BBC One
+102: BBC Two
+103: BBC Three
+104: BBC Four
+105: BBC Parliament
+106: BBC Scotland
+107: BBC Alba
+120: CBBC
+121: CBeebies
+130: S4C
+
+[News & Business]
+140: Bloomberg TV
+
+[Shopping]
+150: QVC UK
+""",
+    },
+}
+
+
+def list_starters():
+    return [{"name": k, "label": v["label"]} for k, v in STARTER_LINEUPS.items()]
+
+
+def get_starter(name):
+    entry = STARTER_LINEUPS.get(name)
+    return entry["text"] if entry else None
+
+
 def safe_name(name):
     """Filesystem-safe wantlist name. None if nothing usable remains.
 
