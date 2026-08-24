@@ -51,6 +51,11 @@ DEFAULTS = {
     # so a routine Monday run mostly skips and a real change still gets
     # caught on its own next pass.
     "freshness_hours": 24 * 6,
+    # How hard the wantlist matcher is allowed to guess once every precise
+    # stage (exact, alias, prefix/suffix) has already failed -- see
+    # wantlist.py's TOKEN_SORT_THRESHOLDS. "strict" tries none of it and is
+    # every wantlist's behaviour before this existed.
+    "match_sensitivity": "strict",
 }
 
 # Anything above this is almost certainly a mistake rather than a real
@@ -98,6 +103,8 @@ def coerce(values):
         out["failover_display"] = DEFAULTS["failover_display"]
     if out.get("push_fallback") not in ("native", "separate"):
         out["push_fallback"] = DEFAULTS["push_fallback"]
+    if out.get("match_sensitivity") not in ("strict", "normal", "relaxed"):
+        out["match_sensitivity"] = DEFAULTS["match_sensitivity"]
     # Arrives from a browser as a JSON bool, but also as the string "false"
     # if anything ever posts it as form data -- which is truthy, and would
     # silently turn group tidying back on for good.

@@ -32,6 +32,7 @@ afterwards in Curate always wins over what the wantlist says on the next run.
 An empty `[]` resets to no group, for channels between two named sections
 that don't belong in either.
 """
+import difflib
 import os
 import re
 
@@ -386,7 +387,48 @@ def _fuzzy(key, pools):
     return min(hits, key=len)
 
 
-def apply(wanted, pools, fuzzy=True):
+# Sensitivity presets for the token-sort stage -- the LAST resort, tried only
+# after exact matching and every prefix/suffix stage in _fuzzy() has already
+# failed. Idea from Lineuparr (another open-source Dispatcharr tool): a
+# staged pipeline with an adjustable ceiling on how far the last, loosest
+# stage is allowed to guess, rather than one fixed fuzzy behaviour for
+# everyone. "strict" is every wantlist's behaviour before this existed --
+# nothing changes unless a sensitivity is explicitly requested.
+TOKEN_SORT_THRESHOLDS = {"strict": None, "normal": 0.86, "relaxed": 0.72}
+
+
+def _token_set(name):
+    """Lowercase word tokens, sorted -- order-independent comparison, so
+    "Sports 1 Meridian" and "Meridian Sports 1" read as the same thing.
+    Operates on the RAW name, not the folded key: folding strips spaces
+    entirely, which throws away exactly the word-boundary information this
+    stage needs.
+    """
+    return " ".join(sorted(re.findall(r"[a-z0-9]+", name.lower())))
+
+
+def _token_sort_match(name, pools_by_name, threshold):
+    """Best token-sort match for `name` among `pools_by_name` (pool key ->
+    a representative raw stream name), or None if nothing clears
+    `threshold` or the top two candidates are too close to call.
+
+    Refuses ambiguity rather than guessing between close scores, the same
+    rule every other stage here already follows -- a wrong guess here is a
+    stream on the wrong channel with no visible sign anything was uncertain.
+    """
+    target = _token_set(name)
+    scored = sorted(
+        ((difflib.SequenceMatcher(None, target, _token_set(pname)).ratio(), key)
+         for key, pname in pools_by_name.items()),
+        reverse=True)
+    if not scored or scored[0][0] < threshold:
+        return None
+    if len(scored) > 1 and (scored[0][0] - scored[1][0]) < 0.03:
+        return None
+    return scored[0][1]
+
+
+def apply(wanted, pools, fuzzy=True, sensitivity="strict"):
     """Restrict candidate pools to wanted channels.
 
     Returns (filtered_pools, missing, fuzzy_matches). `missing` is the wanted
@@ -395,7 +437,14 @@ def apply(wanted, pools, fuzzy=True):
     and the usual cause is a name that needs an alias rather than a provider
     gap. `fuzzy_matches` is reported too: an inexact match is a guess, and a
     guess the operator cannot see is a guess they cannot correct.
+
+    `sensitivity` controls only the LAST stage, token-sort fuzzy matching --
+    "strict" (default) never tries it, matching every wantlist's behaviour
+    before this existed. "normal"/"relaxed" try it only after every earlier,
+    more precise stage in _fuzzy() has already failed.
     """
+    threshold = TOKEN_SORT_THRESHOLDS.get(sensitivity)
+    pools_by_name = None  # built lazily, only if token-sort is ever reached
     filtered, missing, fuzzy_matches = {}, [], []
     for w in wanted:
         streams = pools.get(w.key)
@@ -403,6 +452,10 @@ def apply(wanted, pools, fuzzy=True):
             filtered[w.key] = streams
             continue
         alt = _fuzzy(w.key, pools) if fuzzy else None
+        if not alt and threshold is not None:
+            if pools_by_name is None:
+                pools_by_name = {k: v[0].name for k, v in pools.items() if v}
+            alt = _token_sort_match(w.name, pools_by_name, threshold)
         if alt:
             filtered[w.key] = pools[alt]
             fuzzy_matches.append((w, alt))

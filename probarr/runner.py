@@ -195,7 +195,8 @@ def _run(store, root, source, wantlist, epg, regions, strict_region, region_tags
     if wantlist:
         wanted = wantlist_mod.load(wantlist_mod.resolve_path(root, wantlist), norm)
         log(f"wantlist: {len(wanted)} channels requested")
-        pools, missing, fuzzy = wantlist_mod.apply(wanted, pools)
+        sensitivity = settings_mod.read(root).get("match_sensitivity", "strict")
+        pools, missing, fuzzy = wantlist_mod.apply(wanted, pools, sensitivity=sensitivity)
         for w, alt in fuzzy:
             log(f"    ~ {w.name}: no exact match, using '{alt}'")
         if missing:

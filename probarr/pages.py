@@ -299,6 +299,26 @@ __TOPBAR__
     </div>
 
     <div class="field">
+      <div class="lab">Match sensitivity</div>
+      <div class="ctl">
+        <select id="match_sensitivity">
+          <option value="strict">Strict &mdash; refuse rather than guess (default)</option>
+          <option value="normal">Normal &mdash; also try word-order/typo-tolerant matching</option>
+          <option value="relaxed">Relaxed &mdash; same, with a looser threshold</option>
+        </select>
+        <div class="help">A wanted channel that doesn't match anything exactly,
+          by alias, or by prefix/suffix is reported <b>missing</b> by default
+          &mdash; the safest answer when the alternative is silently guessing
+          wrong. Normal/Relaxed add one more, looser attempt after all of
+          those have failed: comparing the channel name's WORDS regardless of
+          their order (catches "Sports 1 Meridian" for "Meridian Sports 1"),
+          refusing if the best candidate isn't clearly ahead of the next
+          one. Every match found this way is still reported as a guess, same
+          as the existing prefix/suffix matches.</div>
+      </div>
+    </div>
+
+    <div class="field">
       <div class="lab">Frame height</div>
       <div class="ctl"><input type="number" id="frame_height" min="180" max="2160">
         <div class="help">Height of the full-size captured frame, never
@@ -376,7 +396,7 @@ __TOPBAR__
 const $ = id => document.getElementById(id);
 const KEYS = ["concurrency","gap_seconds","sample_seconds","frame_height",
               "thumb_height","source","epg","wantlist","failover_display",
-              "freshness_hours"];
+              "freshness_hours","match_sensitivity"];
 
 function estimate(){
   const c = Math.max(1, parseInt($("concurrency").value||"1",10));

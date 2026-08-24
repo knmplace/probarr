@@ -92,6 +92,48 @@ class TestWantlist(unittest.TestCase):
         self.assertEqual(chans[1].name, "BBC Four")
         self.assertEqual(len(chans), 2)
 
+    def test_token_sort_stage_is_off_by_default(self):
+        # "strict" (the default) must never invent a match a person didn't
+        # explicitly ask for -- every wantlist's behaviour before this stage
+        # existed has to keep reporting genuinely word-reordered names as
+        # missing, not start silently guessing.
+        norm = Normalizer()
+        wanted, _ = wl.parse_detailed("Meridian Sports 1", norm)
+        pools = {norm.key("Sports 1 Meridian"):
+                [Stream(id="1", name="Sports 1 Meridian", url="http://x/1")]}
+        filtered, missing, fuzzy = wl.apply(wanted, pools)
+        self.assertEqual(filtered, {})
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(fuzzy, [])
+
+    def test_token_sort_stage_catches_reordered_words_when_enabled(self):
+        norm = Normalizer()
+        wanted, _ = wl.parse_detailed("Meridian Sports 1", norm)
+        pools = {norm.key("Sports 1 Meridian"):
+                [Stream(id="1", name="Sports 1 Meridian", url="http://x/1")]}
+        filtered, missing, fuzzy = wl.apply(wanted, pools, sensitivity="normal")
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(missing, [])
+        self.assertEqual(len(fuzzy), 1)
+
+    def test_token_sort_stage_refuses_an_ambiguous_pair(self):
+        # Two candidates too close in score to call must still be refused,
+        # the same rule every other stage in this module already follows.
+        # Reordered so neither candidate is a prefix/suffix of the other or
+        # of the wanted key -- this has to reach token-sort itself, not get
+        # resolved (or mis-resolved) by an earlier stage first.
+        norm = Normalizer()
+        wanted, _ = wl.parse_detailed("Alpha Bravo Charlie", norm)
+        pools = {
+            norm.key("Bravo Charlie Alphaa"):
+                [Stream(id="1", name="Bravo Charlie Alphaa", url="http://x/1")],
+            norm.key("Charlie Alpha Bravoo"):
+                [Stream(id="2", name="Charlie Alpha Bravoo", url="http://x/2")],
+        }
+        filtered, missing, fuzzy = wl.apply(wanted, pools, sensitivity="relaxed")
+        self.assertEqual(filtered, {})
+        self.assertEqual(len(missing), 1)
+
 
 class TestRank(unittest.TestCase):
     def test_a_bigger_picture_beats_a_cleaner_log(self):
