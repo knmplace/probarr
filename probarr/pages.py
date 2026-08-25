@@ -1850,6 +1850,15 @@ function render(){
     if(lu.wantlist) cfg.push('<span>channels <b>'+esc(lu.wantlist)+'</b></span>');
     if(lu.epg) cfg.push('<span>guide <b>'+esc(lu.epg)+'</b></span>');
     if(lu.regions) cfg.push('<span>regions <b>'+esc(lu.regions)+'</b></span>');
+    else if(!lu.wantlist)
+      // The same combination that caused a real 1,203-candidate run this
+      // session -- "all channels" with no Regions filter -- but here it's
+      // silent: no tag at all where a set one would show, indistinguishable
+      // from "deliberately not needed" at a glance. Every OTHER run started
+      // from this lineup inherits this until someone notices, so it's
+      // worth flagging every time the lineup list is viewed, not just once.
+      cfg.push('<span style="border-color:var(--warn);color:var(--warn)">'+
+        'no regions set — all channels, all countries</span>');
     if(lu.schedule_days){
       const DAY=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
       const hh=String(lu.schedule_hour==null?2:lu.schedule_hour).padStart(2,"0");
