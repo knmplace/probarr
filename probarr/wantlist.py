@@ -436,15 +436,21 @@ def known_reference_lineups(root, force=False):
         items.append({"file": name, "url": _REFERENCE_RAW_BASE + name,
                       "region": region, "label": label})
     items.sort(key=lambda i: (i["region"], i["label"]))
-    with open(cache_path, "w", encoding="utf-8") as f:
+    tmp = cache_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items, f)
+    os.replace(tmp, cache_path)
     return items
 
 
-def reference_lineup_map(data, normalizer):
-    """Flatten a Lineuparr-style {"categories": {group: [{name, number}]}}
-    JSON payload into {normalized_key: (number, category)}.
+def _walk_reference_categories(data, normalizer):
+    """Yield (key, name, number, category) for every valid entry in a
+    Lineuparr-style {"categories": {group: [{name, number}]}} JSON payload,
+    deduplicated by normalized key (first occurrence wins).
 
+    Shared by reference_lineup_map() and channels_from_reference() -- both
+    read exactly this shape and both need the same validation and dedup
+    rule, so it lives in one place rather than two copies that could drift.
     Format is the one used by the Lineuparr Dispatcharr plugin's published
     lineups (e.g. UK_SkyTV_lineup.json) -- real broadcaster channel numbers
     and genre groupings, something no XMLTV EPG carries. We only read this
@@ -455,7 +461,7 @@ def reference_lineup_map(data, normalizer):
     if not isinstance(categories, dict):
         raise ValueError("not a recognised lineup format (expected a "
                           "'categories' object)")
-    out = {}
+    seen = set()
     for category, entries in categories.items():
         if not isinstance(entries, list):
             continue
@@ -467,10 +473,16 @@ def reference_lineup_map(data, normalizer):
             if not name:
                 continue
             key = normalizer.key(str(name))
-            if not key or key in out:
+            if not key or key in seen:
                 continue
-            out[key] = (number, category)
-    return out
+            seen.add(key)
+            yield key, str(name), number, category
+
+
+def reference_lineup_map(data, normalizer):
+    """Flatten a reference lineup into {normalized_key: (number, category)}."""
+    return {key: (number, category)
+           for key, _, number, category in _walk_reference_categories(data, normalizer)}
 
 
 def channels_from_reference(data, normalizer):
@@ -493,29 +505,9 @@ def channels_from_reference(data, normalizer):
     lookup) is what finds the actual streams later, the same as any
     other hand-built wantlist.
     """
-    categories = data.get("categories") if isinstance(data, dict) else None
-    if not isinstance(categories, dict):
-        raise ValueError("not a recognised lineup format (expected a "
-                          "'categories' object)")
-    out, seen = [], set()
-    for category, entries in categories.items():
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            name = entry.get("name")
-            number = entry.get("number")
-            if not name:
-                continue
-            key = normalizer.key(str(name))
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            out.append(WantedChannel(
-                int(number) if isinstance(number, (int, float)) else None,
-                str(name), "", key, category or None))
-    return out
+    return [WantedChannel(int(number) if isinstance(number, (int, float)) else None,
+                          name, "", key, category or None)
+           for key, name, number, category in _walk_reference_categories(data, normalizer)]
 
 
 def enrich_with_reference(channels, reference_map):

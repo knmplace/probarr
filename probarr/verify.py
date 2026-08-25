@@ -309,7 +309,20 @@ def verify(pools, store, opts, concurrency=1, gap_seconds=0.4,
             # started yet, is what makes Stop take effect promptly instead
             # of only after the full candidate list drains.
             for f in concurrent.futures.as_completed(futures):
-                f.result()
+                try:
+                    f.result()
+                except Exception as e:
+                    # Belt and braces: probe() itself never raises, but
+                    # store.append()/guide lookups inside one() theoretically
+                    # could. Before the should_stop handling above, an
+                    # exception here always propagated loudly (every future
+                    # was consumed via as_completed to the end); now that a
+                    # stop can abandon still-running futures without ever
+                    # calling their .result(), an exception from one of
+                    # THOSE would otherwise vanish silently instead of
+                    # ending the run visibly. Logged here so it's never lost
+                    # either way.
+                    log(f"  probe raised an unexpected error: {e}")
                 if should_stop and should_stop():
                     interrupted[0] = True
                     for pending in futures:

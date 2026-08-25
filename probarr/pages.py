@@ -430,10 +430,19 @@ $("enrichopen").addEventListener("click", () => {
 });
 $("enrich-x").addEventListener("click", () => $("enrichmodal").classList.remove("on"));
 $("enrich-close").addEventListener("click", () => $("enrichmodal").classList.remove("on"));
-$("enrich-go").addEventListener("click", async () => {
+// Shared by both actions below: resolve the dropdown selection to a real
+// URL (falling back to the custom-URL field), or show the same "choose
+// one" warning either way -- used to be copy-pasted into each handler.
+function resolveEnrichUrl(){
   const sel = $("enrich-select").value;
   const url = sel === "__custom__" ? $("enrich-url").value.trim() : sel;
-  if(!url){ $("enrich-result").innerHTML = '<div class="warn">Choose a lineup, or pick "Custom URL…" and paste one.</div>'; return; }
+  if(!url) $("enrich-result").innerHTML =
+    '<div class="warn">Choose a lineup, or pick "Custom URL…" and paste one.</div>';
+  return url;
+}
+$("enrich-go").addEventListener("click", async () => {
+  const url = resolveEnrichUrl();
+  if(!url) return;
   $("enrich-go").disabled = true; $("enrich-go").textContent = "fetching…";
   try{
     const r = await fetch("/api/wantlists/enrich", {method:"POST",
@@ -460,9 +469,8 @@ $("enrich-go").addEventListener("click", async () => {
   $("enrich-go").disabled = false; $("enrich-go").textContent = "Apply to editor";
 });
 $("enrich-load").addEventListener("click", async () => {
-  const sel = $("enrich-select").value;
-  const url = sel === "__custom__" ? $("enrich-url").value.trim() : sel;
-  if(!url){ $("enrich-result").innerHTML = '<div class="warn">Choose a lineup, or pick "Custom URL…" and paste one.</div>'; return; }
+  const url = resolveEnrichUrl();
+  if(!url) return;
   if($("text").value.trim() && !confirm("This replaces everything currently in the editor with this lineup's own channel list. Continue?")) return;
   $("enrich-load").disabled = true; $("enrich-load").textContent = "fetching…";
   try{
