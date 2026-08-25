@@ -16,12 +16,25 @@ a curator can pick the one that actually lines up with the picture.
 import datetime
 import hashlib
 import os
+import re
 import time
 import urllib.request
 
 from .epg import Guide
 from .normalize import Normalizer
 from . import epgsources as epgsources_mod
+
+# Some XMLTV sources declare a <display-name> that's really their internal
+# channel id with a country code glued on ("4Seven.uk", "5Star.uk") rather
+# than a real display name -- real data seen from open-epg.com's UK feed.
+# Cosmetic only: stripped from what's SHOWN and what gets written into a
+# wantlist, never from guide_id/tvg_id, so EPG matching is unaffected.
+_TRAILING_CC_RE = re.compile(r"\.[a-z]{2}$")
+
+
+def _display_clean(name):
+    stripped = _TRAILING_CC_RE.sub("", name)
+    return stripped if len(stripped) >= 2 else name
 
 # XMLTV files are typically refreshed by their publisher on the order of
 # hours, not seconds -- caching each parsed Guide keeps a "check every
@@ -247,7 +260,7 @@ def list_channels(root, source_name, normalizer=None):
     for cid, names in g.display_names.items():
         if not names:
             continue
-        name = names[0]
+        name = _display_clean(names[0])
         key = norm.key(name) or name
         existing = by_key.get(key)
         if existing is None or len(name) < len(existing["guide_name"]):

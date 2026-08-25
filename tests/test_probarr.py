@@ -490,6 +490,21 @@ class TestEpgList(Temp):
         self.assertIn("alts", row)
         self.assertEqual(len(row["alts"]) + 1, 3)
 
+    def test_strips_a_glued_country_code_from_the_display_name(self):
+        # Real data seen from open-epg.com's UK feed: <display-name> is
+        # literally "4Seven.uk", not a real display name -- shown verbatim
+        # and written into a wantlist as-is otherwise ("4Seven.uk | 4Seven.uk").
+        from probarr import epgcheck
+        self._guide([("1", "4Seven.uk"), ("2", "5Star.uk")])
+        out = epgcheck.list_channels(self.root, "test-guide", Normalizer())
+        names = sorted(c["guide_name"] for c in out)
+        self.assertEqual(names, ["4Seven", "5Star"])
+
+    def test_display_clean_leaves_ordinary_names_alone(self):
+        from probarr import epgcheck
+        self.assertEqual(epgcheck._display_clean("BBC One"), "BBC One")
+        self.assertEqual(epgcheck._display_clean("Sky Sports F1"), "Sky Sports F1")
+
     def test_ordinary_names_are_not_mistaken_for_a_glued_region_suffix(self):
         # Regression: "Sky One" was being stripped to "Sky O" because "NE"
         # (North East) matched its own trailing two letters with no
