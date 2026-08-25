@@ -505,8 +505,24 @@ class Handler(BaseHTTPRequestHandler):
             body, sent = self._json_body()
             if sent:
                 return
+            url = body.get("url") or ""
+            # Verified before it's ever saved -- the Sky-Sheffield incident
+            # was a GitHub "blob" HTML page instead of the raw XML, and
+            # nothing caught it until a real run tried to use it and quietly
+            # continued without expected-programme data. Same class of
+            # mistake as pointing at the wrong export URL for any other EPG
+            # host; catching it here means every FUTURE run is protected,
+            # not just the one that happened to be watched closely enough
+            # to notice the warning in its log.
+            if url:
+                try:
+                    epgcheck_mod.load_cached(url, root=self.root)
+                except Exception as e:
+                    return self._send(json.dumps(
+                        {"error": f"could not load this as an XMLTV guide: {e}"[:300]}),
+                        "application/json", 400)
             try:
-                name = epgsources_mod.save(self.root, parts[2], body.get("url") or "")
+                name = epgsources_mod.save(self.root, parts[2], url)
             except ValueError as e:
                 return self._send(json.dumps({"error": str(e)}),
                                   "application/json", 400)

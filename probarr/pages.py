@@ -1218,6 +1218,8 @@ __TOPBAR__
         <span><b id="pdone">0</b>/<span id="ptotal">0</span> probed</span>
         <span id="peta"></span>
         <span id="pstate"></span>
+        <button id="stopverify"
+          style="margin-left:auto;border-color:var(--bad);color:var(--bad)">Stop verifying</button>
       </div>
       <div class="plog" id="plog"></div>
       <div class="pdone" id="pdonebar">
@@ -1302,7 +1304,19 @@ $("start").addEventListener("click", async ()=>{
   $("startmsg").textContent = "";
   currentRunId = d.run_id;
   $("progresswrap").classList.add("show");
+  $("stopverify").style.display = "";
+  $("stopverify").disabled = false;
+  $("stopverify").textContent = "Stop verifying";
   poll();
+});
+
+$("stopverify").addEventListener("click", async () => {
+  if(!currentRunId) return;
+  if(!confirm("Stop this run? Whatever's already been probed is kept -- "+
+              "you can open it in Curate with just those results, or "+
+              "re-run later to pick up the rest.")) return;
+  $("stopverify").disabled = true; $("stopverify").textContent = "stopping…";
+  await fetch("/api/run/"+encodeURIComponent(currentRunId)+"/stop", {method:"POST"});
 });
 
 function poll(){
@@ -1326,6 +1340,7 @@ function poll(){
     if(d.state === "done" || d.state === "error" || d.state === "stopped"){
       clearInterval(poller);
       $("start").disabled = false;
+      $("stopverify").style.display = "none";
       if(d.state === "done"){
         $("pdonebar").classList.add("show");
         $("opencurate").onclick = ()=> location.href="/run/"+encodeURIComponent(currentRunId)+"/curate";
