@@ -100,6 +100,19 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
 .cand .actions{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
 .cand .actions button{font-size:11.5px;padding:3px 8px}
 @media(max-width:860px){.cand .shot{width:104px}}
+/* Curate was built around a fixed 320px sidebar sitting beside the detail
+   pane -- fine on a desktop window, but on a phone-width viewport 320px
+   alone eats nearly the whole screen, crushing the detail pane (where the
+   actual pictures live, the entire point of this page) into an unusable
+   sliver. Stacking below this width is a pragmatic fix, not a full mobile
+   redesign: the channel list gets a bounded, independently-scrollable
+   height above the detail pane rather than the two fighting over width
+   that doesn't exist. */
+@media(max-width:760px){
+  .wrap{flex-direction:column}
+  aside{width:100%;max-height:38vh}
+  main.detail{width:100%}
+}
 .kbd{position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.75);color:var(--dim);
   font-size:10px;padding:2px 6px;border-radius:3px;font-family:ui-monospace,monospace}
 .empty{color:var(--dim);text-align:center;padding:60px 20px}
