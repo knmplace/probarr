@@ -658,6 +658,144 @@ class TestRateLimitGuard(Temp):
                          "two candidates of the same channel ran simultaneously")
 
 
+class TestProviderDeclined(Temp):
+    """The real, measured failure this was built for.
+
+    Signature taken from an actual 733-probe run: all 44 no_frame results
+    had decoded_seconds 0.00, measured_kbps 0, decode errors present, and
+    timed_out False -- the provider accepted the connection and handed back
+    undecodable bytes rather than refusing. They arrived in same-channel
+    bursts, and every failing URL probed clean elsewhere in the same run.
+    """
+
+    def _cap(self, **over):
+        cap = {"decode_errors": 96, "corruption_errors": 40,
+              "corruption_startup": 40, "corruption_steady": 0,
+              "corruption_per_sec": 0.0, "decoded_seconds": 0.0,
+              "error_samples": ["[h264] non-existing PPS 0 referenced"],
+              "capture_seconds": 5.2, "timed_out": False,
+              "rate_limited": False, "dhash": None, "motion": None,
+              "motion_frames": 0, "low_motion": False, "frame32": None,
+              "low_contrast": False, "measured_kbps": 0,
+              "sample_duration": 0.0, "thumb": None, "frame": None,
+              "crop": None, "clip": None}
+        cap.update(over)
+        return cap
+
+    def test_recognises_the_measured_signature(self):
+        from probarr.probe import served_nothing
+        self.assertTrue(served_nothing(self._cap()))
+
+    def test_does_not_fire_on_ambiguous_lookalikes(self):
+        from probarr.probe import served_nothing
+        # Decoded real video but the thumbnail selection missed -- a
+        # different fault, must keep the cheap single retry.
+        self.assertFalse(served_nothing(self._cap(decoded_seconds=10.9,
+                                                  measured_kbps=2608)))
+        # Bytes arrived even though decode reported nothing.
+        self.assertFalse(served_nothing(self._cap(measured_kbps=2608)))
+        # A clean capture that produced a picture is never this.
+        self.assertFalse(served_nothing(self._cap(thumb="/tmp/a.jpg")))
+        # No errors at all -- not the garbage-stream shape.
+        self.assertFalse(served_nothing(self._cap(decode_errors=0)))
+
+    def test_backs_off_properly_instead_of_retrying_once_immediately(self):
+        # The old behaviour was ONE retry after 1.5s, which every one of the
+        # 44 real failures had already used and still failed, because the
+        # same-channel burst causing it was still in flight. The retry must
+        # now escalate and span long enough for that burst to drain.
+        import unittest.mock
+        from probarr import probe as probe_mod
+        from probarr.sources.base import Stream
+
+        opts = probe_mod.ProbeOptions(empty_backoff=(0.05, 0.1, 0.2))
+        stream = Stream(id="s1", name="Comedy Central", url="http://x/cc")
+        meta = {"has_video": True, "width": 1920, "height": 1080, "fps": 50.0,
+               "video_codec": "h264", "video_profile": "", "pix_fmt": "yuv420p",
+               "audio_codec": "aac", "audio_channels": 2,
+               "video_variant_count": 1, "declared_kbps": 0,
+               "container": "mpegts"}
+
+        sleeps = []
+        calls = [0]
+
+        def fake_capture(*a, **k):
+            calls[0] += 1
+            return self._cap()
+
+        with unittest.mock.patch.object(probe_mod, "probe_metadata", return_value=meta), \
+             unittest.mock.patch.object(probe_mod, "capture", side_effect=fake_capture), \
+             unittest.mock.patch.object(probe_mod.time, "sleep", sleeps.append):
+            result = probe_mod.probe(stream, opts, "/tmp/t.jpg")
+
+        self.assertEqual(calls[0], 4)                 # initial + 3 retries
+        self.assertEqual(sleeps, [0.05, 0.1, 0.2])    # escalating, not 1.5 once
+        self.assertEqual(result["status"], probe_mod.STATUS_NO_FRAME)
+        self.assertTrue(result["provider_declined"])
+        self.assertIn("declining to serve", result["reason"])
+
+    def test_stops_retrying_as_soon_as_a_frame_arrives(self):
+        # The whole premise is that these clear on their own -- so a retry
+        # that succeeds must not keep burning provider connections, and the
+        # result must be a normal verdict, not no_frame.
+        import unittest.mock
+        from probarr import probe as probe_mod
+        from probarr.sources.base import Stream
+
+        opts = probe_mod.ProbeOptions(empty_backoff=(0.05, 0.1, 0.2))
+        stream = Stream(id="s1", name="Comedy Central", url="http://x/cc")
+        meta = {"has_video": True, "width": 1920, "height": 1080, "fps": 50.0,
+               "video_codec": "h264", "video_profile": "", "pix_fmt": "yuv420p",
+               "audio_codec": "aac", "audio_channels": 2,
+               "video_variant_count": 1, "declared_kbps": 0,
+               "container": "mpegts"}
+        calls = [0]
+
+        def fake_capture(*a, **k):
+            calls[0] += 1
+            if calls[0] < 3:
+                return self._cap()
+            return self._cap(thumb="/tmp/t.jpg", decoded_seconds=10.9,
+                            measured_kbps=2608, decode_errors=12,
+                            corruption_startup=12)
+
+        with unittest.mock.patch.object(probe_mod, "probe_metadata", return_value=meta), \
+             unittest.mock.patch.object(probe_mod, "capture", side_effect=fake_capture), \
+             unittest.mock.patch.object(probe_mod.time, "sleep", lambda s: None):
+            result = probe_mod.probe(stream, opts, "/tmp/t.jpg")
+
+        self.assertEqual(calls[0], 3)                 # stopped on success
+        self.assertEqual(result["status"], probe_mod.STATUS_OK)
+        self.assertEqual(result["attempts"], 3)
+
+    def test_an_ordinary_empty_capture_keeps_the_cheap_single_retry(self):
+        # Not every empty capture is a provider refusal -- one that decoded
+        # real video but produced no picture must not pay the long backoff.
+        import unittest.mock
+        from probarr import probe as probe_mod
+        from probarr.sources.base import Stream
+
+        opts = probe_mod.ProbeOptions(empty_backoff=(3.0, 8.0, 20.0))
+        stream = Stream(id="s1", name="X", url="http://x/1")
+        meta = {"has_video": True, "width": 1920, "height": 1080, "fps": 50.0,
+               "video_codec": "h264", "video_profile": "", "pix_fmt": "yuv420p",
+               "audio_codec": "aac", "audio_channels": 2,
+               "video_variant_count": 1, "declared_kbps": 0,
+               "container": "mpegts"}
+        sleeps = []
+
+        def fake_capture(*a, **k):
+            return self._cap(decoded_seconds=10.9, measured_kbps=2608)
+
+        with unittest.mock.patch.object(probe_mod, "probe_metadata", return_value=meta), \
+             unittest.mock.patch.object(probe_mod, "capture", side_effect=fake_capture), \
+             unittest.mock.patch.object(probe_mod.time, "sleep", sleeps.append):
+            result = probe_mod.probe(stream, opts, "/tmp/t.jpg")
+
+        self.assertEqual(sleeps, [1.5])
+        self.assertNotIn("provider_declined", result)
+
+
 class TestReferenceLineups(Temp):
     def _fake_response(self, payload):
         body = json.dumps(payload).encode()

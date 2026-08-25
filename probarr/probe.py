@@ -131,7 +131,28 @@ class ProbeOptions:
     probe_timeout: int = 20      # ffprobe wall clock
     capture_timeout: int = 45    # ffmpeg wall clock
     measure_bitrate: bool = True
-    retry_empty: bool = True     # one retry when a capture yields no picture at all
+    retry_empty: bool = True     # retry when a capture yields no picture at all
+
+    # Backoff schedule (seconds) for a capture that came back with NOTHING
+    # USABLE AT ALL -- see served_nothing() and the note on retry_empty
+    # below. Deliberately escalating and spread over ~30s rather than the
+    # single 1.5s retry this used to do.
+    #
+    # Measured, not guessed. Across a real 733-probe run every one of the
+    # 44 no_frame results had these exact properties: decoded_seconds 0.00,
+    # measured_kbps 0, ~96 decode errors, timed_out False, and a capture
+    # that ended after ~5s against a 25s requested window. They arrived in
+    # same-channel BURSTS (six candidates of one channel launched within
+    # seconds, all six failing, the seventh -- running alone -- succeeding),
+    # and every single failing URL was probed clean at another point in the
+    # same run. So the stream was fine; the provider simply would not serve
+    # that many connections to one channel at once, and said so by handing
+    # back undecodable bytes instead of an HTTP error.
+    #
+    # All 44 had already used the old single 1.5s retry and still failed,
+    # because 1.5s later the rest of the burst was still in flight. The
+    # burst takes ~20s to drain, which is what this schedule is sized for.
+    empty_backoff: tuple = (3.0, 8.0, 20.0)
 
     # Three images per candidate, all from the same decoded frame:
     #
@@ -527,6 +548,35 @@ def capture(url: str, opts: ProbeOptions, thumb_path: str,
     return out
 
 
+def served_nothing(cap: dict) -> bool:
+    """Did this capture receive a connection that delivered nothing usable?
+
+    Distinct from "this channel is broken", and the distinction is the whole
+    point: ffprobe has ALREADY succeeded by the time capture() runs (probe()
+    returns STATUS_DEAD before this otherwise), so the provider does have
+    something to serve and described it. This is the case where it then
+    handed back a stream that decoded to literally zero seconds of video and
+    zero bytes, while emitting decode errors the whole way -- the shape a
+    connection-limited provider produces instead of refusing cleanly.
+
+    All three conditions together, because each alone is ambiguous:
+      no picture     -- could be a thumbnail-selection miss on real video
+      zero decoded   -- could be a stream that genuinely just started
+      zero bytes     -- could be measure_bitrate being switched off
+
+    Deliberately NOT keyed on the error text. The stderr in the real cases
+    is ordinary decoder complaint ("non-existing PPS 0 referenced",
+    "decode_slice_header error") -- identical to what a healthy stream emits
+    for the fraction of a second before it locks on, which is exactly why
+    WARMUP_SECONDS exists. What separates them is not what ffmpeg said, it
+    is that nothing whatsoever came out the other end.
+    """
+    return (cap.get("thumb") is None
+            and not cap.get("decoded_seconds")
+            and not cap.get("measured_kbps")
+            and cap.get("decode_errors", 0) > 0)
+
+
 def probe(stream, opts: ProbeOptions, thumb_path: str,
           frame_path: str = None, crop_path: str = None,
           clip_path: str = None) -> dict:
@@ -541,15 +591,39 @@ def probe(stream, opts: ProbeOptions, thumb_path: str,
                 "total_seconds": round(time.time() - t0, 1)}
 
     cap = capture(stream.url, opts, thumb_path, frame_path, crop_path, clip_path)
+    attempts = 1
     if cap["thumb"] is None and opts.retry_empty:
         # A capture that produces no picture at all is very often a transient
         # connect failure rather than a broken stream -- seen for real against
         # a proxying IPTV manager, where the first attempt returned in 0.1s
-        # having fetched nothing. Retrying once costs one connection and
-        # avoids condemning a working channel.
-        time.sleep(1.5)
-        cap = capture(stream.url, opts, thumb_path, frame_path, crop_path, clip_path)
+        # having fetched nothing. Retrying costs a connection and avoids
+        # condemning a working channel.
+        #
+        # How hard to retry depends on WHICH kind of empty this is:
+        #
+        #   served_nothing()  the provider took the connection and delivered
+        #                     nothing usable -- measured against real data,
+        #                     that is a transient refusal under same-channel
+        #                     load and it clears within ~20s, so back off
+        #                     properly rather than immediately.
+        #   anything else     a one-off miss; the original single quick
+        #                     retry is the right cost.
+        #
+        # Sized against the real failures rather than padded for its own
+        # sake: a genuinely broken channel cannot reach here at all (ffprobe
+        # would have returned STATUS_DEAD first), so the worst case is a
+        # channel whose metadata is fine but which never delivers video --
+        # rare, and worth ~30s to be sure about.
+        backoff = list(opts.empty_backoff or ()) if served_nothing(cap) else [1.5]
+        for delay in backoff:
+            time.sleep(delay)
+            cap = capture(stream.url, opts, thumb_path, frame_path,
+                          crop_path, clip_path)
+            attempts += 1
+            if cap["thumb"] is not None:
+                break
         cap["retried"] = True
+    cap["attempts"] = attempts
 
     result = {**meta, **cap}
     variants = meta.get("video_variant_count", 1)
@@ -585,11 +659,23 @@ def probe(stream, opts: ProbeOptions, thumb_path: str,
         # that, passing a channel that had delivered no frames whatsoever.
         result["status"] = STATUS_NO_FRAME
         if cap.get("rate_limited"):
-            # Distinct from a genuinely dead/broken stream: the provider
-            # actively refused the connection (HTTP 429/403 in ffmpeg's
-            # stderr), which the caller can act on differently -- see
-            # RateLimitGuard in verify.py.
+            # The provider said so explicitly, in HTTP. Rare from the
+            # provider this was measured against -- it prefers to hand back
+            # garbage (below) -- but free to detect and unambiguous when it
+            # does happen.
             result["reason"] = "provider refused the connection (429/403) -- rate limited, not dead"
+        elif served_nothing(cap):
+            # Say what actually happened rather than blaming the channel.
+            # ffprobe saw a real video stream moments earlier, so the
+            # provider HAS this stream; it just would not deliver it on
+            # this connection, across every retry.
+            result["reason"] = (
+                f"provider accepted the connection but delivered no decodable "
+                f"video at all, on {cap.get('attempts', 1)} attempt(s) over "
+                f"~{int(sum(opts.empty_backoff or ()))}s -- the stream itself "
+                f"probed fine, so this is the provider declining to serve it "
+                f"(usually too many connections to one channel at once)")
+            result["provider_declined"] = True
         else:
             result["reason"] = "responded, but no frame could be decoded"
     elif cap.get("corruption_per_sec", 0) > CORRUPTION_RATE_MAX:
