@@ -70,56 +70,83 @@ the design toward giving the per-provider account a **real, working
 `server_url`** -- which, once you're doing that, changes what this feature
 actually is.
 
-## Two shapes this could take
+## The actual target: native accounts, not custom streams at all
 
-**A. Stub account, real URL, streams still forced custom.**
-Create one M3U account per probarr provider, named after it, with that
-provider's real `server_url` (the same spec probarr already has configured)
-so account creation doesn't misfire. Keep pushing every candidate through
-`get_or_create_custom_stream()` exactly as today, just pointed at this
-account's id instead of the shared `"custom"` one. Per-provider
-`max_streams` becomes real and visible in Dispatcharr's normal UI (no
-`locked` flag needed, since it's now a genuine account). Smallest possible
-change to the actual push logic -- `enforce_custom_stream_limit()`
-generalizes to "per pushing-provider account" instead of "the one shared
-account," and that's most of the diff.
+An earlier draft of this document treated "give the per-provider account a
+real URL" and "stop using custom streams" as two separate, independently
+optional moves (labelled Shape A and Shape B) and hedged between them. That
+was wrong, and worth correcting explicitly rather than quietly editing
+away: **only the combination is the point.**
 
-Leaves an oddity: Dispatcharr will now ALSO try to genuinely parse this
-account's M3U on its own refresh schedule, in parallel with probarr doing
-its own independent fetch/parse of the identical source for probing. Two
-systems reading the same catalog, never reconciled, is exactly the kind of
-thing that was flagged as a real, lived pain point earlier in this
-project's history (the IPTV pipeline's own M3U-account/EPG-source
-confusion). Worth an explicit decision on whether that duplication is
-acceptable or needs addressing (see below), not an accident to discover
-later.
+The requirement driving this isn't "make the number nicer to look at" --
+it's that a real Dispatcharr M3U/Xtream account's `max_streams` is enforced
+against *everything* drawn from that account: Live TV channel playback AND
+VOD (Movies/TV Shows, via the same account's Xtream catalog scanning --
+see the docker-media Dispatcharr setup, which already runs exactly this for
+its own paid provider). A custom stream is invisible to that accounting
+**no matter which M3U account it's filed under** -- attaching it to a
+per-provider account instead of the shared `"custom"` one makes the number
+visible and correctly scoped, but it still wouldn't be the same pool of
+connections Live TV and VOD are actually drawing from. Giving the account a
+real URL without also stopping the use of custom streams gets none of the
+actual benefit; it only fixes the cosmetics.
 
-**B. Real native account, prefer Dispatcharr's own parsed streams.**
-Same per-provider account as A, but `get_or_create_custom_stream()` first
-checks whether the candidate's URL already exists as a NATIVE stream in
-that account's own table (i.e. Dispatcharr's own M3U refresh already found
-it) before creating a synthetic custom-attached one. Only falls back to a
-custom stream for URLs Dispatcharr's own parse doesn't have an exact match
-for -- which will happen sometimes (probarr's matching/normalisation is not
-byte-identical to Dispatcharr's own M3U parsing), so the fallback path
-can't be removed, only made the exception rather than the rule.
+So the target shape is: Dispatcharr genuinely parses each provider's M3U as
+a real, first-class account (exactly as if a user pointed Dispatcharr at it
+by hand), and probarr's export **attaches channels to the streams that
+parse already produced**, rather than inventing new ones. `is_custom`
+streams stop being the normal path; they are, at most, a rare fallback for
+a URL Dispatcharr's own parse doesn't have (see the open questions below),
+not the mechanism.
 
-This is the more "native," more intuitive end state -- a probarr-managed
-channel becomes indistinguishable from one a user set up by hand pointing
-Dispatcharr at the same provider, which is a real usability win for anyone
-who later wants to poke at it in Dispatcharr's own UI without wondering why
-half their streams are mysteriously "custom." It is also more moving parts:
-timing (probarr pushing before Dispatcharr's own refresh has run yet, so
-the native lookup finds nothing and creates a redundant custom stream
-anyway), staleness (Dispatcharr's refresh interval vs. probarr's own probe
-cadence), and now two independent parsers of the same account whose outputs
-need to agree closely enough for the URL-match lookup to actually hit.
+Practically: `get_or_create_custom_stream()` is replaced by something that
+looks up the candidate's URL in that provider's account's own
+already-parsed stream table first. **This is more feasible than it might
+sound**: checked live while scoping this, probarr's own M3U parser
+(`sources/m3u.py`) stores each stream's URL completely verbatim off the
+`#EXTINF` line (`url=line`, no rewriting, no normalisation of the URL
+itself -- only the display name gets that treatment, for matching
+purposes). Dispatcharr is parsing the exact same M3U text through the exact
+same kind of line-by-line read, so a plain URL-string lookup against its
+own stream table should hit reliably. This needs confirming against a real
+account once one exists, not just asserted (see the open questions below),
+but there's no structural reason to expect it to fail often.
+
+A URL that genuinely doesn't appear in Dispatcharr's own parse -- possible
+if probarr matched a redirect/alias variant, or probed between refreshes --
+still needs *some* answer. Falling back to a custom stream for that one
+candidate is acceptable as a rare edge case; it stops being acceptable if
+it turns out to be the common case, which is exactly the kind of thing to
+measure once this exists rather than assume either way.
+
+One more thing this surfaces: **there is currently no Dispatcharr M3U
+account, anywhere on this instance, that actually matches probarr's own
+current provider credentials.** The three that exist (`custom`,
+`BunnyCustom`, `BunnyVOD`) all carry older, superseded logins. So step
+zero of building this, before any probarr code changes, is a real account
+existing to natively parse against at all -- either created fresh, or one
+of the existing stale ones corrected. Worth remembering this is not purely
+a probarr-side change: it depends on Dispatcharr-side setup being right
+first, for however many providers a given user has.
 
 ## Open questions, before anyone writes code
 
-- **A or B?** A is safe and mechanical; B is the better end state but real
-  scope. Worth deciding explicitly rather than drifting into B's complexity
-  while aiming for A's timeline.
+- **Step zero, and it's outside probarr's own code**: no Dispatcharr M3U
+  account on this instance currently matches probarr's own live provider
+  credentials (see above) -- so before any of this can even be tested, a
+  real, correctly-configured account needs to exist for Dispatcharr to
+  natively parse. Whether creating/fixing that account is something
+  probarr's own setup flow should do automatically (via the API, same as
+  everything else here) or is left as a manual Dispatcharr-side step per
+  provider is itself worth deciding, not assuming.
+- **How often does the URL lookup actually miss?** The verbatim-URL
+  reasoning above is sound but untested against real data. Once a real
+  account exists and Dispatcharr has done one native refresh, worth
+  literally counting: of a provider's candidates probarr has probed, what
+  fraction match an existing native stream by URL vs. need the custom-
+  stream fallback? If the miss rate turns out to be high, the "fallback is
+  rare" assumption this design leans on is wrong and needs revisiting
+  before relying on it.
 - **Migration**: every existing probarr-pushed channel today has its
   streams sitting under the shared `"custom"` account. Does a per-provider
   redesign need to migrate those (re-point existing Stream rows'
