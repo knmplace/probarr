@@ -317,10 +317,18 @@ this is a real trade-off, not a technical detail to bury:
   the fallback. Doubles the lineup, but it's visible and pickable by hand.
 
 Candidates that already belong to the target Dispatcharr instance reuse
-their existing stream id directly. Everything else (a plain M3U probe, or a
-different Dispatcharr instance) gets a real custom stream created in the
-target (`is_custom: true`), matched by URL on repeat pushes so re-exporting
-never piles up duplicates.
+their existing stream id directly. Everything else is matched by URL
+against every stream the target already has — including ones Dispatcharr
+parsed itself from a real M3U/Xtream account, which take priority over an
+older custom stream sharing the same URL if both exist. Only a URL that
+matches nothing gets a real custom stream created (`is_custom: true`), and
+that match-by-URL is what keeps re-exporting from ever piling up
+duplicates. See
+[docs/design/per-provider-m3u-accounts.md](docs/design/per-provider-m3u-accounts.md)
+for why landing on Dispatcharr's own native streams matters beyond
+tidiness: a real M3U account's connection limit is enforced against Live
+TV playback and VOD together, which a custom stream is invisible to
+regardless of which account it's filed under.
 
 ## Browsing a source without probing
 

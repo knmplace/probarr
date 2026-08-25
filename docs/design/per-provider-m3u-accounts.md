@@ -1,9 +1,13 @@
 # Per-provider Dispatcharr accounts, instead of the shared "custom" one
 
-Status: **scoped, not started**. This is a design document, not a plan
-anyone has committed to executing. It exists so the tradeoffs are written
-down once, in one place, rather than re-derived from scratch (or from
-Slack/Discord memory) whenever someone picks this up.
+Status: **shipped and verified live (2026-08-25)**, for one provider on one
+instance. `mybunny`'s Dispatcharr account (`BunnyCustom`) now natively
+parses the real catalog, and a fresh push after clearing out the old
+custom-stream channels came back **100% native (371/371 stream
+references across 124 channels), 0% custom**. What remains open is
+generalising this from "one provider, corrected by hand" to something
+every provider gets automatically -- see Open questions, most of which
+narrowed or resolved during the build but a few of which are still real.
 
 ## The problem
 
@@ -129,53 +133,85 @@ of the existing stale ones corrected. Worth remembering this is not purely
 a probarr-side change: it depends on Dispatcharr-side setup being right
 first, for however many providers a given user has.
 
-## Open questions, before anyone writes code
+## What actually shipped
 
-- **Step zero, and it's outside probarr's own code**: no Dispatcharr M3U
-  account on this instance currently matches probarr's own live provider
-  credentials (see above) -- so before any of this can even be tested, a
-  real, correctly-configured account needs to exist for Dispatcharr to
-  natively parse. Whether creating/fixing that account is something
-  probarr's own setup flow should do automatically (via the API, same as
-  everything else here) or is left as a manual Dispatcharr-side step per
-  provider is itself worth deciding, not assuming.
-- **How often does the URL lookup actually miss?** The verbatim-URL
-  reasoning above is sound but untested against real data. Once a real
-  account exists and Dispatcharr has done one native refresh, worth
-  literally counting: of a provider's candidates probarr has probed, what
-  fraction match an existing native stream by URL vs. need the custom-
-  stream fallback? If the miss rate turns out to be high, the "fallback is
-  rare" assumption this design leans on is wrong and needs revisiting
-  before relying on it.
-- **Migration**: every existing probarr-pushed channel today has its
-  streams sitting under the shared `"custom"` account. Does a per-provider
-  redesign need to migrate those (re-point existing Stream rows'
-  `m3u_account`, which the live test confirms the API allows), or does it
-  only apply going forward, leaving old exports as a second, understood
-  legacy shape indefinitely? A silent split (some channels enforced
-  per-provider, older ones still pooled in `"custom"`) is probably the
-  worst outcome and worth ruling out explicitly rather than falling into.
+Two code changes, both in `probarr/sources/dispatcharr.py`, plus one
+Dispatcharr-side correction done by hand:
+
+1. **Step zero, done manually**: `BunnyCustom`'s `server_url` corrected to
+   probarr's live `mybunny` credentials, `max_streams` set to 4, refreshed.
+   `get_or_create_custom_stream()` needed **no code change at all** for
+   this part -- it already looked up the full stream table by URL before
+   ever creating anything new (re-read closely while starting this; the
+   original problem statement above slightly overstated how hardcoded the
+   custom-stream path was). Once a real account existed to find matches
+   in, most candidates started resolving natively immediately.
+2. **`find_account_for_source()` / `enforce_provider_stream_limit()`**:
+   the actual missing piece -- `enforce_custom_stream_limit()` could only
+   ever tighten the ONE shared `"custom"` account. The new pair finds a
+   provider's own real account by exact `server_url` match and ratchets
+   *its* `max_streams` the same way, wired into the export push in
+   `web.py` alongside the existing shared-account call (which stays, as
+   the fallback's own safety net).
+3. **`stream_url_map()` native-vs-custom bug**, found immediately while
+   verifying #2 against real data, not anticipated in the original scoping:
+   a channel pushed *before* its provider had a correctly configured
+   account keeps its old custom stream. Once the account is fixed and
+   Dispatcharr's own refresh produces a NATIVE stream with the identical
+   URL, the old code's plain `{url: id}` dict comprehension kept whichever
+   row paginated last -- no preference between the two. Confirmed live: one
+   real channel's four candidates split 3 custom / 1 native purely from
+   pagination order, despite all four existing natively by push time.
+   Fixed by scanning custom and native separately and merging native
+   second, so it always wins. Not deleting the stale custom rows --
+   consistent with `dispatcharr_export.py`'s documented never-delete
+   policy -- they just stop being referenced.
+
+**Measured, not estimated**: the catalog-wide URL match rate (95.9% of
+43,888 URLs, see above) predicted the fallback would be rare. The real
+push came back even cleaner -- 100% native across every channel actually
+curated -- which makes sense in hindsight: candidates that never matched
+anything natively were disproportionately the ones already excluded from
+curation for other reasons (disabled provider groups, dead streams).
+
+## Open questions, still real
+
+- **This fixed one provider on one instance, by hand.** `BunnyCustom`'s
+  URL correction was a manual API call during this session, not something
+  probarr's own code did. Nothing here auto-creates or auto-corrects a
+  Dispatcharr account for a NEW provider -- `find_account_for_source()`
+  only finds an account that already matches; if none does, it's silently
+  a no-op and that provider's candidates keep landing in the shared
+  `"custom"` fallback exactly as before. Whether probarr's setup flow
+  should offer to create/fix the matching account automatically (and
+  trigger the refresh, and accept the one-time notification that comes
+  with it -- see below) is the real remaining design decision.
+- **Migration for existing custom-stream channels on other providers**:
+  this session's channels self-healed because Dispatcharr had already been
+  wiped clean and re-pushed from scratch. A provider whose channels were
+  never wiped, only had its account corrected, relies entirely on the
+  `stream_url_map()` fix plus a normal re-push to swap over -- worth
+  confirming that path explicitly (push without a wipe first) rather than
+  assuming the clean-slate result generalises.
 - **Naming/collision**: what happens when a provider is renamed or deleted
   in probarr's own `providers.json` -- does its Dispatcharr account get
-  renamed/orphaned/deleted too? `dispatcharr_export.py`'s own docstring
-  already documents a deliberate "never delete, only create and update"
-  policy for channels; whatever this becomes should say explicitly whether
-  M3U accounts follow the same rule.
-- **The account-creation refresh notification** (finding 2, above): even
-  with a real `server_url`, is there a way to suppress or pre-empt that
-  first automatic refresh attempt (an API flag, creating with the periodic
-  task disabled up front, etc.), or is a first-run "M3U Processing" log
-  line simply an accepted, harmless cosmetic side effect once the URL is
-  real and the refresh actually succeeds? Worth a few minutes checking
-  Dispatcharr's own source for the signal that triggers it before assuming
-  either way.
+  renamed/orphaned/deleted too? Still unaddressed; `find_account_for_source`
+  only ever looks up by the CURRENT spec, so a renamed provider with an
+  unchanged URL keeps matching fine, but a provider whose URL itself
+  changes (credential rotation, a new package) silently stops matching its
+  old account until something (a human, or future code) points one at the
+  other again.
+- **The account-creation refresh notification**: still untested whether it
+  can be suppressed or pre-empted. Not hit this time because `BunnyCustom`
+  already existed -- it was corrected, not created. Relevant again the
+  moment auto-creation (above) becomes real.
 - **Rate limits while doing this work**: Dispatcharr's own API throttles
-  rapid repeated `/api/accounts/token/` calls (confirmed live while
-  researching this doc -- two 429s from re-authenticating too quickly).
-  probarr's own `Dispatcharr.api()` already retries 429s correctly,
-  honouring the `"Expected available in N seconds"` body Dispatcharr
-  returns; any exploratory scripting against a live instance while building
-  this should go through that client, not raw calls, to avoid hitting it.
+  rapid repeated `/api/accounts/token/` calls (confirmed live -- 429s from
+  re-authenticating too quickly, twice, during this build). probarr's own
+  `Dispatcharr.api()` already retries 429s correctly, honouring the
+  `"Expected available in N seconds"` body Dispatcharr returns; any
+  exploratory scripting against a live instance should go through that
+  client, not raw calls.
 
 ## Non-goals
 
