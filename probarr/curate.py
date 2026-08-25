@@ -1239,15 +1239,27 @@ function watch(id, btn){
     try{ snap = await (await fetch("/api/queue", {cache:"no-store"})).json(); }
     catch(e){ btn.textContent="!"; btn.disabled=false; return; }
     const st = snap.keys && snap.keys[key];
+    // Same highlight Diagnose uses for a multi-candidate scan, applied
+    // here too -- a single re-probe deserves the same "this is the one
+    // being watched right now" cue, not just a button whose text changes.
+    const row = document.querySelector('.cand[data-id="'+CSS.escape(id)+'"]');
     if(st){
       btn.textContent = snap.blocked ? "\u23f8"
         : st.state === "running" ? "\u2026"
         : ("#" + (st.position || "?"));
       btn.title = snap.blocked || "";
+      if(row) row.classList.toggle("probing", st.state === "running");
       if(tries < 600) return setTimeout(tick, 1000);
-      btn.textContent="!"; btn.disabled=false; return;
+      btn.textContent="!"; btn.disabled=false; if(row) row.classList.remove("probing");
+      return;
     }
+    if(row) row.classList.remove("probing");
     await refreshChannel(current);
+    const fresh = document.querySelector('.cand[data-id="'+CSS.escape(id)+'"]');
+    if(fresh){
+      fresh.classList.add("just-scanned");
+      setTimeout(()=>fresh.classList.remove("just-scanned"), 1500);
+    }
   };
   btn.textContent="\u2026";
   setTimeout(tick, 600);
