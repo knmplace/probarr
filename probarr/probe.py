@@ -229,7 +229,7 @@ def probe_metadata(url: str, opts: ProbeOptions) -> Optional[dict]:
            "-analyzeduration", "4M", "-probesize", "8M",
            "-show_entries",
            "stream=index,codec_type,codec_name,width,height,r_frame_rate,"
-           "bit_rate,channels,profile,pix_fmt:format=bit_rate,format_name",
+           "bit_rate,channels,profile,pix_fmt:format=bit_rate,format_name,duration",
            "-of", "json", url]
     res, failed = _run(cmd, opts.probe_timeout)
     if failed or res.returncode != 0 or not res.stdout.strip():
@@ -277,7 +277,36 @@ def probe_metadata(url: str, opts: ProbeOptions) -> Optional[dict]:
         # kept for reference, superseded by the measured figure below.
         "declared_kbps": int((v or {}).get("bit_rate") or fmt.get("bit_rate") or 0) // 1000,
         "container": fmt.get("format_name", "") or "",
+        "container_duration": _parse_container_duration(fmt),
     }
+
+
+def _parse_container_duration(fmt: dict) -> Optional[float]:
+    """A finite, parseable `format.duration` from a channel that is
+    supposed to be live TV, not evidence of anything -- it is direct
+    contradiction. A genuine live relay (MPEG-TS, or an HLS/DASH playlist
+    with no fixed end) has no total length to report, and real IPTV
+    sources overwhelmingly omit the field entirely or return "N/A" for
+    exactly that reason. A stream that instead answers with a real number
+    is serving a finite file on a loop -- the provider's own "channel
+    unavailable" card, most often -- which is a DIFFERENT signature to the
+    cross-stream still-picture matching annotate_placeholders() already
+    does: that needs the SAME picture to show up on more than one channel
+    before it is willing to call it a placeholder, so a single channel
+    quietly looping a lone finite file with no twin elsewhere in the
+    lineup would sail through it undetected. This catches that case with
+    no cross-channel corroboration needed at all -- one stream, one probe,
+    the container format answering a question a live broadcast should
+    never be able to answer.
+    """
+    raw = fmt.get("duration")
+    if raw in (None, "", "N/A"):
+        return None
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
 
 
 def _media_duration(path, opts) -> float:
@@ -609,6 +638,19 @@ def probe(stream, opts: ProbeOptions, thumb_path: str,
                 "total_seconds": round(time.time() - t0, 1)}
     if not meta["has_video"]:
         return {"status": STATUS_NO_VIDEO, "reason": "no video stream", **meta,
+                "total_seconds": round(time.time() - t0, 1)}
+    if meta.get("container_duration") is not None:
+        # Caught here, before ever spending the second (expensive) decode
+        # connection -- same principle as STATUS_DEAD/STATUS_NO_VIDEO
+        # above, and the exact reason this lives in probe_metadata() rather
+        # than capture(): a channel that answers a finite duration to "how
+        # long is this live broadcast" has already answered the only
+        # question that matters. See _parse_container_duration()'s
+        # docstring for why this needs no cross-channel corroboration,
+        # unlike annotate_placeholders()'s still-picture matching.
+        return {"status": STATUS_PLACEHOLDER, **meta,
+                "reason": (f"reports a fixed {meta['container_duration']:.1f}s "
+                          "duration; a live channel has none"),
                 "total_seconds": round(time.time() - t0, 1)}
 
     cap = capture(stream.url, opts, thumb_path, frame_path, crop_path, clip_path)

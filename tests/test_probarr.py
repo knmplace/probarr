@@ -934,6 +934,85 @@ class TestClipNeverCostsThePicture(Temp):
         self.assertEqual(result["status"], probe_mod.STATUS_OK)
 
 
+class TestFiniteFilePlaceholder(unittest.TestCase):
+    """A live channel's container should never report a finite duration --
+    real IPTV sources overwhelmingly omit the field or return "N/A". A
+    stream that answers with a real number is looping a finite file, most
+    often the provider's own "channel unavailable" card. Complementary to
+    annotate_placeholders()'s cross-channel still-picture matching (which
+    needs the SAME frame on more than one channel): this needs no
+    corroboration at all, so it catches a lone channel looping a file with
+    no twin elsewhere in the lineup.
+    """
+
+    def test_parses_a_genuine_finite_duration(self):
+        from probarr.probe import _parse_container_duration
+        self.assertEqual(_parse_container_duration({"duration": "42.5"}), 42.5)
+
+    def test_a_real_live_stream_reports_none_of_the_forms_ffprobe_uses(self):
+        from probarr.probe import _parse_container_duration
+        for fmt in ({}, {"duration": None}, {"duration": ""},
+                   {"duration": "N/A"}, {"duration": "0"}, {"duration": "-1"},
+                   {"duration": "not a number"}):
+            self.assertIsNone(_parse_container_duration(fmt), fmt)
+
+    def test_probe_flags_a_finite_duration_before_ever_capturing(self):
+        # The whole point of catching this in probe_metadata() rather than
+        # capture(): it must never spend the second, expensive decode
+        # connection on a candidate already proven to be a finite loop.
+        import unittest.mock
+        from probarr import probe as probe_mod
+        from probarr.sources.base import Stream
+
+        fake_meta = {"has_video": True, "width": 1920, "height": 1080,
+                    "fps": 50.0, "video_codec": "h264", "video_profile": "",
+                    "pix_fmt": "yuv420p", "audio_codec": "aac",
+                    "audio_channels": 2, "video_variant_count": 1,
+                    "declared_kbps": 0, "container": "mpegts",
+                    "container_duration": 12.3}
+        opts = probe_mod.ProbeOptions()
+        stream = Stream(id="s1", name="Holding Card", url="http://x/1")
+
+        with unittest.mock.patch.object(probe_mod, "probe_metadata", return_value=fake_meta), \
+             unittest.mock.patch.object(probe_mod, "capture") as fake_capture:
+            result = probe_mod.probe(stream, opts, "/tmp/t.jpg")
+
+        fake_capture.assert_not_called()
+        self.assertEqual(result["status"], probe_mod.STATUS_PLACEHOLDER)
+        self.assertIn("12.3s", result["reason"])
+
+    def test_probe_does_not_flag_a_stream_with_no_declared_duration(self):
+        import unittest.mock
+        from probarr import probe as probe_mod
+        from probarr.sources.base import Stream
+
+        fake_meta = {"has_video": True, "width": 1920, "height": 1080,
+                    "fps": 50.0, "video_codec": "h264", "video_profile": "",
+                    "pix_fmt": "yuv420p", "audio_codec": "aac",
+                    "audio_channels": 2, "video_variant_count": 1,
+                    "declared_kbps": 0, "container": "mpegts",
+                    "container_duration": None}
+        fake_cap = {"thumb": "/tmp/t.jpg", "decode_errors": 0,
+                   "corruption_errors": 0, "corruption_startup": 0,
+                   "corruption_steady": 0, "corruption_per_sec": 0.0,
+                   "decoded_seconds": 10.0, "error_samples": [],
+                   "capture_seconds": 10.0, "timed_out": False,
+                   "rate_limited": False, "dhash": None, "motion": None,
+                   "motion_frames": 0, "low_motion": False, "frame32": None,
+                   "low_contrast": False, "measured_kbps": 1000,
+                   "sample_duration": 10.0, "frame": None, "crop": None,
+                   "clip": None}
+        opts = probe_mod.ProbeOptions()
+        stream = Stream(id="s1", name="Real Channel", url="http://x/1")
+
+        with unittest.mock.patch.object(probe_mod, "probe_metadata", return_value=fake_meta), \
+             unittest.mock.patch.object(probe_mod, "capture", return_value=fake_cap) as fake_capture:
+            result = probe_mod.probe(stream, opts, "/tmp/t.jpg")
+
+        fake_capture.assert_called_once()
+        self.assertEqual(result["status"], probe_mod.STATUS_OK)
+
+
 class TestReprobeSampleLength(Temp):
     """A plain single ↻ re-probe used to inherit the full unattended-Verify
     sample length (cfg["sample_seconds"], 8-10s by default) -- a leftover
