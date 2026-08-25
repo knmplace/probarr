@@ -270,6 +270,43 @@ class TestStore(Temp):
         self.assertEqual(s.read_removals(), [])
 
 
+class TestBackup(Temp):
+    def test_round_trips_config_and_run_state(self):
+        from probarr import backup as backup_mod
+        providers.save(self.root, "myprov", "http://example.com/list.m3u")
+        s = RunStore(self.root, "run1")
+        s.write_meta({"run_id": "run1"})  # list_runs() only sees a run via run.json
+        s.write_wantlist_raw([{"number": 1, "name": "One", "key": "ONE"}], [])
+        s.append({"rec_key": "ONE|a", "channel_key": "ONE", "status": "ok"})
+        s.write_selection({"ONE": {"group": "Entertainment"}})
+
+        data = backup_mod.export_tar(self.root)
+
+        fresh = tempfile.mkdtemp(prefix="probarr-test-restore-")
+        self.addCleanup(shutil.rmtree, fresh, ignore_errors=True)
+        backup_mod.import_tar(fresh, data)
+
+        self.assertEqual(providers.list_all(fresh)[0]["name"], "myprov")
+        restored = RunStore(fresh, "run1")
+        self.assertEqual(restored.load()[0]["status"], "ok")
+        self.assertEqual(restored.read_selection()["ONE"]["group"], "Entertainment")
+
+    def test_refuses_a_path_traversal_member(self):
+        import io
+        import tarfile
+        from probarr import backup as backup_mod
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            info = tarfile.TarInfo(name="../../etc/passwd")
+            payload = b"pwned"
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        with self.assertRaises(ValueError):
+            backup_mod.import_tar(self.root, buf.getvalue())
+        # And nothing was written outside root as a side effect of the attempt.
+        self.assertFalse(os.path.exists(os.path.join(self.root, "..", "..", "etc", "passwd")))
+
+
 class TestAliases(Temp):
     def test_folds_both_sides_so_the_lookup_matches(self):
         aliases_mod.save(self.root, "U&Drama", "drama")

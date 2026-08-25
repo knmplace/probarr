@@ -366,6 +366,25 @@ __TOPBAR__
     </div>
   </div>
 
+  <div class="card">
+    <h2>Backup &amp; restore</h2>
+    <div class="lead">Everything needed to rebuild this install elsewhere:
+      providers, lineups, wantlists, EPG sources, settings, and every run's
+      curated state. Deliberately not the captured thumbnails/frames/clips
+      &mdash; a run's own "Clear images" already treats those as disposable,
+      and for a lineup with a long history they can dwarf everything else.
+      Provider credentials ARE included, so keep the download somewhere
+      only you can reach.</div>
+    <div class="row">
+      <a href="/api/backup/export"><button class="primary">Download backup</button></a>
+      <label class="muted" style="display:flex;gap:6px;align-items:center">
+        <input type="file" id="restorefile" accept=".gz,.tar.gz,application/gzip" style="display:none">
+        <button id="restorepick">Restore from a backup&hellip;</button>
+      </label>
+      <span class="muted" id="restoremsg"></span>
+    </div>
+  </div>
+
   <div class="row">
     <button class="primary" id="save">Save settings</button>
     <span class="muted" id="msg"></span>
@@ -427,6 +446,32 @@ $("save").addEventListener("click", async ()=>{
   estimate();
   $("msg").textContent="saved";
   setTimeout(()=>$("msg").textContent="", 1800);
+});
+
+$("restorepick").addEventListener("click", e=>{ e.preventDefault(); $("restorefile").click(); });
+$("restorefile").addEventListener("change", async ()=>{
+  const f = $("restorefile").files[0]; if(!f) return;
+  if(!confirm("Restore from “"+f.name+"”?\n\nThis OVERWRITES providers, "+
+              "lineups, wantlists, EPG sources, settings and every run's curated "+
+              "state with what's in the backup. There is no merge and no undo "+
+              "— if you want to keep what's here now, back it up first."))
+  { $("restorefile").value = ""; return; }
+  $("restoremsg").textContent = "restoring…";
+  try{
+    const data = await f.arrayBuffer();
+    const r = await fetch("/api/backup/import", {method:"POST",
+      headers:{"Content-Type":"application/gzip"}, body:data});
+    const d = await r.json();
+    if(!r.ok || d.error){
+      $("restoremsg").textContent = "error: "+(d.error||"restore failed");
+    } else {
+      $("restoremsg").textContent = "restored — reloading…";
+      setTimeout(()=>location.reload(), 1200);
+    }
+  }catch(e){
+    $("restoremsg").textContent = "request failed";
+  }
+  $("restorefile").value = "";
 });
 
 load();

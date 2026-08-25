@@ -13,10 +13,12 @@ import json
 import time
 import os
 import posixpath
+import tarfile
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import backup as backup_mod
 from . import curate, decisions, pages, probequeue, providers as providers_mod
 from . import epgcheck as epgcheck_mod
 from . import aliases as aliases_mod
@@ -165,6 +167,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/decisions":
             return self._send(json.dumps(decisions.analyse(self.root)),
                               "application/json")
+        if path == "/api/backup/export":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            include_images = qs.get("images", ["0"])[0] == "1"
+            body = backup_mod.export_tar(self.root, include_images=include_images)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{backup_mod.export_filename()}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/api/queue":
             return self._send(json.dumps(self._queue().snapshot()),
                               "application/json")
@@ -299,6 +313,19 @@ class Handler(BaseHTTPRequestHandler):
             return None, True
         return body, False
 
+    def _raw_body(self, limit):
+        """Read a bounded raw binary body. Returns (bytes, error_response_sent).
+
+        For an uploaded backup archive rather than a JSON API call -- same
+        bound-it-first reasoning as _json_body(), just without assuming the
+        content is text.
+        """
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > limit:
+            self._send('{"error":"too large"}', "application/json", 413)
+            return None, True
+        return self.rfile.read(length), False
+
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
         parts = [p for p in path.split("/") if p]
@@ -309,6 +336,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._send(json.dumps(settings_mod.write(self.root, body)),
                               "application/json")
+
+        if path == "/api/backup/import":
+            # A restore rewrites providers, lineups, wantlists and every
+            # run's own state in place -- deliberately no merge, the backup
+            # IS the new truth, same reasoning as any other restore. 200MB
+            # covers a very large run history with images left out, which
+            # is the whole point of leaving them out by default.
+            data, sent = self._raw_body(limit=200 * 1024 * 1024)
+            if sent:
+                return
+            try:
+                backup_mod.import_tar(self.root, data)
+            except (ValueError, OSError, EOFError, tarfile.TarError) as e:
+                return self._send(json.dumps({"error": str(e)[:300]}),
+                                  "application/json", 400)
+            return self._send('{"ok": true}', "application/json")
 
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "run" \
                 and parts[3] == "reprobe":
