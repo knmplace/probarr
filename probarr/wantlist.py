@@ -319,6 +319,86 @@ def load(path, normalizer):
         return parse(f.read(), normalizer)
 
 
+def render(channels):
+    """Serialise WantedChannel objects back to wantlist text.
+
+    Companion to parse_detailed(): a round trip through parse -> modify ->
+    render is how enrichment (below) applies its changes, rather than trying
+    to patch the original text in place and risk mangling a hand-written
+    file's comments/spacing.
+    """
+    lines, current_group, first = [], "__unset__", True
+    for c in channels:
+        if c.group != current_group:
+            if not first:
+                lines.append("")
+            lines.append(f"[{c.group}]" if c.group else "[]")
+            current_group = c.group
+        first = False
+        prefix = f"{c.number}: " if c.number is not None else ""
+        suffix = f" | {c.tvg_id}" if c.tvg_id else ""
+        lines.append(f"{prefix}{c.name}{suffix}")
+    return "\n".join(lines) + "\n"
+
+
+def reference_lineup_map(data, normalizer):
+    """Flatten a Lineuparr-style {"categories": {group: [{name, number}]}}
+    JSON payload into {normalized_key: (number, category)}.
+
+    Format is the one used by the Lineuparr Dispatcharr plugin's published
+    lineups (e.g. UK_SkyTV_lineup.json) -- real broadcaster channel numbers
+    and genre groupings, something no XMLTV EPG carries. We only read this
+    shape; nothing about it is probarr-specific or bundled into this repo,
+    the operator supplies whichever lineup URL is relevant to them.
+    """
+    categories = data.get("categories") if isinstance(data, dict) else None
+    if not isinstance(categories, dict):
+        raise ValueError("not a recognised lineup format (expected a "
+                          "'categories' object)")
+    out = {}
+    for category, entries in categories.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            number = entry.get("number")
+            if not name:
+                continue
+            key = normalizer.key(str(name))
+            if not key or key in out:
+                continue
+            out[key] = (number, category)
+    return out
+
+
+def enrich_with_reference(channels, reference_map):
+    """Fill in missing channel numbers/groups from a reference lineup map.
+
+    Only fills gaps -- an existing number or an existing group (whether from
+    the wantlist file or inherited from a prior curated run) is never
+    overwritten, since those reflect a decision already made for this
+    lineup specifically. Returns (channels, matched_count).
+    """
+    matched = 0
+    for c in channels:
+        hit = reference_map.get(c.key)
+        if not hit:
+            continue
+        number, category = hit
+        changed = False
+        if c.number is None and number is not None:
+            c.number = int(number)
+            changed = True
+        if not c.group and category:
+            c.group = category
+            changed = True
+        if changed:
+            matched += 1
+    return channels, matched
+
+
 MIN_FUZZY_LEN = 5
 
 # How much extra trailing text the REVERSE case (wantlist more specific than

@@ -100,6 +100,36 @@ __TOPBAR__
       <span class="muted">tick names from a guide someone else already keeps current, adds to
         whatever's in the editor rather than replacing it</span>
     </div>
+    <div class="row" style="margin-top:8px">
+      <button id="enrichopen">Fill in numbers &amp; groups from a reference lineup&hellip;</button>
+      <span class="muted">an EPG has no channel numbers or categories &mdash; this cross-references
+        the channels already in the editor below against a real broadcaster lineup (e.g. Sky UK)
+        to fill in what's missing, without touching anything already set</span>
+    </div>
+  </div>
+
+  <div class="modal" id="enrichmodal">
+    <div class="modalbox" style="width:min(560px,94vw)">
+      <button class="modalx" id="enrich-x" title="Close">&#10005;</button>
+      <h3>Fill in numbers &amp; groups from a reference lineup</h3>
+      <div class="sub">Paste the URL of a lineup JSON in the
+        <code>{"categories": {"Group": [{"name": "...", "number": N}, ...]}}</code>
+        shape &mdash; e.g. one of the
+        <a href="https://github.com/PiratesIRC/Dispatcharr-Lineuparr-Plugin/tree/main/Lineuparr"
+           target="_blank" rel="noopener">Lineuparr project's published lineups</a> on GitHub.
+        Only fetched, never stored here. Matches by name against the channels already in the
+        editor below; only fills a number or group that's currently blank &mdash; anything you've
+        already set (here or in a prior curated run) is left alone.</div>
+      <div class="mfield" style="margin:10px 0">
+        <input type="text" id="enrich-url" style="width:100%"
+          placeholder="https://raw.githubusercontent.com/.../UK_SkyTV_lineup.json">
+      </div>
+      <div class="mresult" id="enrich-result"></div>
+      <div class="mrow">
+        <button id="enrich-close">Close</button>
+        <button class="primary" id="enrich-go">Apply to editor</button>
+      </div>
+    </div>
   </div>
 
   <div class="modal" id="epgimportmodal">
@@ -335,6 +365,34 @@ $("epgimp-add").addEventListener("click", () => {
   $("text").value = (cur && !cur.endsWith("\n") ? cur+"\n" : cur) + picked.join("\n") + "\n";
   preview();
   $("epgimportmodal").classList.remove("on");
+});
+
+// --- Fill in numbers/groups from a reference lineup ----------------------
+$("enrichopen").addEventListener("click", () => {
+  $("enrich-result").innerHTML = "";
+  $("enrichmodal").classList.add("on");
+});
+$("enrich-x").addEventListener("click", () => $("enrichmodal").classList.remove("on"));
+$("enrich-close").addEventListener("click", () => $("enrichmodal").classList.remove("on"));
+$("enrich-go").addEventListener("click", async () => {
+  const url = $("enrich-url").value.trim();
+  if(!url){ $("enrich-result").innerHTML = '<div class="warn">Paste a lineup URL first.</div>'; return; }
+  $("enrich-go").disabled = true; $("enrich-go").textContent = "fetching…";
+  try{
+    const r = await fetch("/api/wantlists/enrich", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({url, text: $("text").value})});
+    const d = await r.json();
+    if(!r.ok || d.error){
+      $("enrich-result").innerHTML = '<div class="warn">'+esc(d.error||"failed")+'</div>';
+    } else {
+      $("text").value = d.text;
+      preview();
+      $("enrich-result").innerHTML = '<div class="ok">Matched '+d.matched+' of '+d.total+
+        ' channels &mdash; editor updated.</div>';
+    }
+  }catch(e){ $("enrich-result").innerHTML = '<div class="warn">Request failed.</div>'; }
+  $("enrich-go").disabled = false; $("enrich-go").textContent = "Apply to editor";
 });
 
 $("save").addEventListener("click", async ()=>{

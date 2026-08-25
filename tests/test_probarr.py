@@ -134,6 +134,44 @@ class TestWantlist(unittest.TestCase):
         self.assertEqual(filtered, {})
         self.assertEqual(len(missing), 1)
 
+    def test_render_round_trips_number_group_and_tvg_id(self):
+        norm = Normalizer()
+        text = "[News]\n101: BBC News | bbc.news.uk\n\n[Sport]\n401: Sky Sports F1\n"
+        chans, _ = wl.parse_detailed(text, norm)
+        rendered = wl.render(chans)
+        chans2, warnings2 = wl.parse_detailed(rendered, norm)
+        self.assertEqual(warnings2, [])
+        self.assertEqual([c.as_dict() for c in chans], [c.as_dict() for c in chans2])
+
+    def test_reference_lineup_map_flattens_categories(self):
+        data = {"categories": {"News": [{"name": "BBC News", "number": 231}],
+                                "Sport": [{"name": "Sky Sports F1", "number": 401}]}}
+        norm = Normalizer()
+        m = wl.reference_lineup_map(data, norm)
+        self.assertEqual(m[norm.key("BBC News")], (231, "News"))
+        self.assertEqual(m[norm.key("Sky Sports F1")], (401, "Sport"))
+
+    def test_reference_lineup_map_rejects_unrecognised_shape(self):
+        with self.assertRaises(ValueError):
+            wl.reference_lineup_map({"channels": []}, Normalizer())
+
+    def test_enrich_only_fills_gaps_never_overwrites(self):
+        norm = Normalizer()
+        # "BBC News" has no number/group and should be filled; "Sky Sports F1"
+        # already has both and must be left exactly as the operator set them.
+        chans, _ = wl.parse_detailed(
+            "BBC News\n[Football]\n999: Sky Sports F1\n", norm)
+        ref = wl.reference_lineup_map(
+            {"categories": {"News": [{"name": "BBC News", "number": 231}],
+                             "Sport": [{"name": "Sky Sports F1", "number": 401}]}}, norm)
+        chans, matched = wl.enrich_with_reference(chans, ref)
+        self.assertEqual(matched, 1)
+        by_name = {c.name: c for c in chans}
+        self.assertEqual(by_name["BBC News"].number, 231)
+        self.assertEqual(by_name["BBC News"].group, "News")
+        self.assertEqual(by_name["Sky Sports F1"].number, 999)
+        self.assertEqual(by_name["Sky Sports F1"].group, "Football")
+
 
 class TestRank(unittest.TestCase):
     def test_a_bigger_picture_beats_a_cleaner_log(self):

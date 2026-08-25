@@ -16,6 +16,7 @@ import posixpath
 import tarfile
 import threading
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import backup as backup_mod
@@ -360,6 +361,41 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(json.dumps({"error": str(e)[:300]}),
                                   "application/json", 400)
             return self._send('{"ok": true}', "application/json")
+
+        if path == "/api/wantlists/enrich":
+            # Fills in channel numbers and groups from an operator-supplied
+            # reference lineup (e.g. a Lineuparr-format JSON on GitHub) --
+            # data XMLTV EPGs simply don't carry. Nothing about the
+            # reference itself is stored or bundled; it's fetched fresh
+            # each time, same BYO-URL pattern as an EPG source.
+            body, sent = self._json_body()
+            if sent:
+                return
+            url = (body.get("url") or "").strip()
+            text = body.get("text") or ""
+            if not url:
+                return self._send(json.dumps({"error": "reference URL required"}),
+                                  "application/json", 400)
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "probarr/0.1"})
+                raw = urllib.request.urlopen(req, timeout=30).read()
+                data = json.loads(raw)
+            except Exception as e:
+                return self._send(json.dumps({"error": f"could not fetch/parse reference: {e}"[:300]}),
+                                  "application/json", 400)
+            norm = self._norm()
+            try:
+                ref_map = wl.reference_lineup_map(data, norm)
+            except ValueError as e:
+                return self._send(json.dumps({"error": str(e)[:300]}),
+                                  "application/json", 400)
+            channels, warnings = wl.parse_detailed(text, norm)
+            channels, matched = wl.enrich_with_reference(channels, ref_map)
+            return self._send(json.dumps({
+                "text": wl.render(channels),
+                "matched": matched,
+                "total": len(channels),
+            }), "application/json")
 
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "run" \
                 and parts[3] == "reprobe":
