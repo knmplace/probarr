@@ -912,6 +912,8 @@ PROVIDERS_EXTRA = WANTLIST_EXTRA + """
 .testresult.good{background:rgba(39,194,76,.1);border:1px solid var(--ok);color:var(--ok)}
 .testresult.bad{background:rgba(240,80,80,.1);border:1px solid var(--bad);color:var(--bad)}
 .hint2{color:var(--faint);font-size:11.5px;margin-top:6px}
+.ptype{padding:7px 16px}
+.ptype.on{background:var(--accent2);border-color:var(--accent2);color:#04222c;font-weight:600}
 """
 
 PROVIDERS_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -927,14 +929,51 @@ __TOPBAR__
     <div class="row" style="margin-bottom:10px">
       <input type="text" id="name" placeholder="Name, e.g. My IPTV">
     </div>
-    <div class="pwrap">
+
+    <div class="row" style="margin-bottom:10px">
+      <button type="button" id="ptype-iptv" class="ptype on">IPTV</button>
+      <button type="button" id="ptype-dispatcharr" class="ptype">Dispatcharr</button>
+    </div>
+
+    <div id="ptype-iptv-fields">
+      <div class="row" style="margin-bottom:8px">
+        <input type="text" id="iptv-url" style="flex:1"
+          placeholder="Playlist URL, or just the provider's host/domain">
+      </div>
+      <div class="pwrap">
+        <input type="text" id="iptv-user" placeholder="Username (only if not already in the URL)">
+        <input type="password" id="iptv-pass" style="flex:1"
+          placeholder="Password (only if not already in the URL)">
+        <button id="iptv-toggle" type="button">Show</button>
+      </div>
+      <div class="hint2">Paste the full playlist URL your provider gave you (username/password
+        stay blank) &mdash; or, if you were given an Xtream login instead of a link, just the
+        host/domain plus your username and password.</div>
+    </div>
+
+    <div id="ptype-dispatcharr-fields" style="display:none">
+      <div class="row" style="margin-bottom:8px">
+        <input type="text" id="disp-host" placeholder="IP or hostname" style="flex:1">
+        <input type="number" id="disp-port" placeholder="Port" style="width:110px" value="9191">
+      </div>
+      <div class="pwrap">
+        <input type="text" id="disp-user" placeholder="Username">
+        <input type="password" id="disp-pass" style="flex:1" placeholder="Password">
+        <button id="disp-toggle" type="button">Show</button>
+      </div>
+      <div class="hint2">Its own admin login, not the Xtream/M3U playback credentials &mdash;
+        this is what pushes curated channels back into Dispatcharr.</div>
+    </div>
+
+    <div class="hint2" style="margin-top:10px">
+      <a href="#" id="advtoggle">Paste a raw connection string instead&hellip;</a>
+    </div>
+    <div class="pwrap" id="advwrap" style="display:none;margin-top:8px">
       <input type="password" id="spec" style="flex:1"
         placeholder="M3U URL, xtream://user:pass@host:port, or dispatcharr://user:pass@host:port">
       <button id="toggle" type="button">Show</button>
     </div>
-    <div class="hint2">Paste the playlist URL your provider gave you. For
-      Xtream/Dispatcharr logins use <code>xtream://user:pass@host:port</code>
-      or <code>dispatcharr://user:pass@host:port</code>.</div>
+
     <div class="row" style="margin-top:12px">
       <input type="number" id="concurrency" min="1" style="width:90px"
         placeholder="default" title="Max simultaneous probe connections for THIS provider. Blank uses the global default in Settings. Each provider gets its own pool, so a saturated one never stalls jobs against a different, more permissive provider.">
@@ -972,19 +1011,70 @@ __TOPBAR__
 
 <script>
 const $ = id => document.getElementById(id);
+let PTYPE = "iptv";
 
-$("toggle").addEventListener("click", ()=>{
-  const on = $("spec").type === "password";
-  $("spec").type = on ? "text" : "password";
-  $("toggle").textContent = on ? "Hide" : "Show";
+function pwToggle(fieldId, btnId){
+  $(btnId).addEventListener("click", ()=>{
+    const on = $(fieldId).type === "password";
+    $(fieldId).type = on ? "text" : "password";
+    $(btnId).textContent = on ? "Hide" : "Show";
+  });
+}
+pwToggle("spec", "toggle");
+pwToggle("iptv-pass", "iptv-toggle");
+pwToggle("disp-pass", "disp-toggle");
+
+$("ptype-iptv").addEventListener("click", ()=>{
+  PTYPE = "iptv";
+  $("ptype-iptv").classList.add("on"); $("ptype-dispatcharr").classList.remove("on");
+  $("ptype-iptv-fields").style.display = ""; $("ptype-dispatcharr-fields").style.display = "none";
 });
+$("ptype-dispatcharr").addEventListener("click", ()=>{
+  PTYPE = "dispatcharr";
+  $("ptype-dispatcharr").classList.add("on"); $("ptype-iptv").classList.remove("on");
+  $("ptype-dispatcharr-fields").style.display = ""; $("ptype-iptv-fields").style.display = "none";
+});
+$("advtoggle").addEventListener("click", (e)=>{
+  e.preventDefault();
+  $("advwrap").style.display = $("advwrap").style.display === "none" ? "" : "none";
+});
+
+// Builds the same raw spec string the backend has always accepted
+// (xtream://user:pass@host:port, dispatcharr://user:pass@host:port, or a
+// bare M3U URL) from whichever structured fields are actually filled in,
+// so the backend never needed to change to get a friendlier form. The
+// advanced box, if open and non-empty, always wins -- it's an explicit
+// escape hatch for anything the structured fields can't express.
+function computeSpec(){
+  const adv = $("spec").value.trim();
+  if($("advwrap").style.display !== "none" && adv) return adv;
+  if(PTYPE === "dispatcharr"){
+    const host = $("disp-host").value.trim(), port = $("disp-port").value.trim();
+    const user = $("disp-user").value.trim(), pass = $("disp-pass").value.trim();
+    if(!host) return "";
+    return "dispatcharr://"+encodeURIComponent(user)+":"+encodeURIComponent(pass)+
+      "@"+host+(port?":"+port:"");
+  }
+  const url = $("iptv-url").value.trim();
+  const user = $("iptv-user").value.trim(), pass = $("iptv-pass").value.trim();
+  if(!url) return "";
+  if(user || pass){
+    // A host/domain, not a full link -- strip any scheme the user pasted
+    // out of habit and build an Xtream login from it.
+    const hostport = url.replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+    return "xtream://"+encodeURIComponent(user)+":"+encodeURIComponent(pass)+"@"+hostport;
+  }
+  return url;   // a complete playlist URL, used exactly as given
+}
+function syncSpec(){ $("spec").value = computeSpec(); return $("spec").value; }
+
 $("spec").addEventListener("input", ()=>{
   $("spec").style.borderColor = "";
   $("testresult").className = "testresult";
 });
 
 $("test").addEventListener("click", async ()=>{
-  const spec = $("spec").value.trim();
+  const spec = syncSpec();
   const box = $("testresult");
   if(!spec){ box.className="testresult show bad"; box.textContent="Enter a provider address first."; return; }
   box.className="testresult show"; box.textContent="Testing\u2026";
@@ -1003,7 +1093,7 @@ $("test").addEventListener("click", async ()=>{
 });
 
 $("save").addEventListener("click", async ()=>{
-  const name=$("name").value.trim(), spec=$("spec").value.trim();
+  const name=$("name").value.trim(), spec=syncSpec();
   const concurrency = $("concurrency").value.trim();
   if(!name || !spec){
     // The address field is left EMPTY after clicking Edit (the real value
@@ -1013,12 +1103,21 @@ $("save").addEventListener("click", async ()=>{
     // message next to the button was easy to miss entirely, which read as
     // "editing a provider doesn't work" rather than "the field is empty".
     // Highlighting the field itself, not just the message, makes it obvious.
-    $("spec").style.borderColor = "var(--bad)";
-    $("spec").focus();
+    // Which field that actually IS depends on what's visible: the raw
+    // advanced box during an edit (still the only way to change an
+    // existing provider's credentials), or the structured field a fresh
+    // add is missing.
+    const advOpen = $("advwrap").style.display !== "none";
+    const target = advOpen ? $("spec")
+      : PTYPE === "dispatcharr" ? $("disp-host") : $("iptv-url");
+    target.style.borderColor = "var(--bad)";
+    target.focus();
     $("testresult").className = "testresult show bad";
     $("testresult").textContent = !name ? "Name is required."
-      : "Paste the address again \u2014 it's cleared after Edit since it's "
-        + "never sent to the browser, and wasn't re-entered.";
+      : advOpen
+        ? "Paste the address again \u2014 it's cleared after Edit since it's "
+          + "never sent to the browser, and wasn't re-entered."
+        : "Fill in the provider's address first.";
     return;
   }
   $("spec").style.borderColor = "";
@@ -1028,8 +1127,12 @@ $("save").addEventListener("click", async ()=>{
     body:JSON.stringify({spec, concurrency: concurrency ? parseInt(concurrency,10) : null})});
   const d = await r.json();
   $("savemsg").textContent = d.ok ? "saved" : ("error: "+(d.error||"failed"));
-  if(d.ok){ $("name").value=""; $("spec").value=""; $("concurrency").value="";
-            $("testresult").className="testresult"; }
+  if(d.ok){
+    $("name").value=""; $("spec").value=""; $("concurrency").value="";
+    $("iptv-url").value=""; $("iptv-user").value=""; $("iptv-pass").value="";
+    $("disp-host").value=""; $("disp-user").value=""; $("disp-pass").value="";
+    $("testresult").className="testresult";
+  }
   loadList();
 });
 
@@ -1061,6 +1164,13 @@ document.addEventListener("click", async e=>{
            $("spec").placeholder = "re-enter the address for " + p.name;
            $("spec").style.borderColor = "var(--bad)";
            $("concurrency").value = p.concurrency || "";
+           // Editing still needs the raw box: the structured fields can't
+           // be pre-filled from a saved credential that's deliberately
+           // never sent to the browser, and re-deriving which of three
+           // formats it was from a redacted string isn't worth it when
+           // the box that already handles "enter a full spec string" does
+           // the job.
+           $("advwrap").style.display = "";
            $("testresult").className = "testresult show bad";
            $("testresult").textContent = "Address cleared for editing — it's never sent "
              + "to the browser, so paste it again below before saving.";

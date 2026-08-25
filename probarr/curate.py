@@ -576,6 +576,30 @@ __TOPBAR__
 
 <script>
 const DATA = __DATA__;
+// Matches the server's own auto-fallback depth (AUTO_FALLBACK_DEPTH in
+// web.py) -- the client's bootstrap guess and the export's own fallback
+// should never disagree about how many streams an uncurated channel gets.
+// Real bug this ordering fixes: a completely untouched run (DATA.selection
+// genuinely empty -- nothing has ever been curated) calls autoAll() right
+// here at script load, which needs AUTO_FALLBACK_DEPTH immediately. It
+// used to be declared further down the file as a `const`, which is in its
+// temporal dead zone until that later line actually runs -- so opening
+// Curate on a brand new run threw "Cannot access before initialization"
+// and the whole page silently failed to render, with no channel list, no
+// filter chips, nothing. Only ever triggered by a run whose selection was
+// still completely empty, which nothing earlier in this session had
+// happened to hit.
+const AUTO_FALLBACK_DEPTH = 4;
+function autoPick(ch){
+  const usable = (ch.candidates||[]).filter(c => c.status==="ok" || c.status==="dirty");
+  return {include: usable.length>0 && usable[0].status==="ok",
+          streams: usable.slice(0, AUTO_FALLBACK_DEPTH).map(c=>c.id),
+          primary: usable[0]?usable[0].id:null,
+          fallback: usable[1]?usable[1].id:null, confirmed:false};
+}
+function autoAll(){
+  const s={}; DATA.channels.forEach(ch => s[ch.key]=autoPick(ch)); return s;
+}
 let SEL = DATA.selection && Object.keys(DATA.selection).length
   ? DATA.selection : autoAll();
 // Opens on triage when there IS anything to triage, else on All -- so the
@@ -621,20 +645,6 @@ async function checkPending(){
   }catch(e){}
 }
 
-// Matches the server's own auto-fallback depth (AUTO_FALLBACK_DEPTH in
-// web.py) -- the client's bootstrap guess and the export's own fallback
-// should never disagree about how many streams an uncurated channel gets.
-const AUTO_FALLBACK_DEPTH = 4;
-function autoPick(ch){
-  const usable = (ch.candidates||[]).filter(c => c.status==="ok" || c.status==="dirty");
-  return {include: usable.length>0 && usable[0].status==="ok",
-          streams: usable.slice(0, AUTO_FALLBACK_DEPTH).map(c=>c.id),
-          primary: usable[0]?usable[0].id:null,
-          fallback: usable[1]?usable[1].id:null, confirmed:false};
-}
-function autoAll(){
-  const s={}; DATA.channels.forEach(ch => s[ch.key]=autoPick(ch)); return s;
-}
 function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
   .replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
 
@@ -876,6 +886,23 @@ function renderDetail(){
       ' since the last scan \u2014 show</b><ul style="display:none">'+
       ch.changes.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul></div>'
     : '';
+  // Exclude/Re-include applies to a channel with no matched candidates
+  // just as well as one with them -- a real gap this used to have: a
+  // channel a provider simply doesn't carry is exactly the case for
+  // "stop asking about this every run" without deleting it outright
+  // (Remove), which a provider swap later might make moot. Built once,
+  // shared between both branches below so they can't drift.
+  const includeBtn =
+    '<button id="includebtn2" title="'+(s.include !== false
+      ? 'Leave this channel (or a multi-selection) out of every export, '+
+        'without deleting its probe results — the same as pressing x. '+
+        'It stays in this run and can be re-included at any time.'
+      : 'Bring this channel (or a multi-selection) back into every export. '+
+        'Same as pressing x.')+'">'+
+    (MARKED.size>1
+      ? (s.include !== false ? 'Exclude ('+MARKED.size+')' : 'Re-include ('+MARKED.size+')')
+      : (s.include !== false ? 'Exclude this channel' : 'Re-include this channel'))+
+    '</button>';
   d.innerHTML =
     '<div class="dhead"><h1>'+(ch.number!=null?ch.number+' &middot; ':'')+
       '<span id="titletext" tabindex="0" title="Click to rename">'+esc(ch.title)+'</span>'+
@@ -902,13 +929,14 @@ function renderDetail(){
       // resolve "no candidate streams matched", by searching the catalogue
       // past the matcher -- was hidden on precisely the channels that need
       // it. Rename and Remove apply just as well to a channel with no
-      // candidates; Diagnose, EPG check and Push do not, since there is
-      // nothing yet to diagnose, compare or send.
+      // candidates; Diagnose, EPG check and Duplicate do not, since there
+      // is nothing yet to diagnose, compare or copy.
       '<button id="findstreamsbtn" title="Every stream the provider offers for '+
         'this channel, probed or not \u2014 plus a search of the whole catalogue '+
         'for variants the matcher did not connect to it. Tick what is worth '+
         'probing; only this channel is touched.">Find streams</button>'+
       (ch.missing ?
+        includeBtn+
         '<button id="removechanbtn" class="danger" title="Remove this channel from '+
         'the run \u2014 optionally from Dispatcharr too.">Remove</button>'+
         '<span class="muted" id="diagnosemsg"></span>' :
@@ -924,16 +952,7 @@ function renderDetail(){
         '<button id="dupchanbtn" title="Make a second copy of this channel so '+
         'it can sit in another group as well \u2014 same streams, no re-probing.">'+
         'Duplicate</button>'+
-        '<button id="includebtn2" title="'+(s.include !== false
-          ? 'Leave this channel (or a multi-selection) out of every export, '+
-            'without deleting its probe results \u2014 the same as pressing x. '+
-            'It stays in this run and can be re-included at any time.'
-          : 'Bring this channel (or a multi-selection) back into every export. '+
-            'Same as pressing x.')+'">'+
-        (MARKED.size>1
-          ? (s.include !== false ? 'Exclude ('+MARKED.size+')' : 'Re-include ('+MARKED.size+')')
-          : (s.include !== false ? 'Exclude this channel' : 'Re-include this channel'))+
-        '</button>'+
+        includeBtn+
         '<button id="removechanbtn" class="danger" title="Remove this channel from '+
         'the run \u2014 optionally from Dispatcharr too.">Remove</button>'+
         '<span class="muted" id="diagnosemsg"></span>')+
