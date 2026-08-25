@@ -171,6 +171,36 @@ whose premise is "look at the picture".
 
 Selections persist server-side, so they survive a different browser or machine.
 
+## Lineups, and keeping a channel list current
+
+A **run** is one verification pass — a snapshot. A **lineup** (`/lineups`) is
+the durable thing a run is a snapshot *of*: "my Sky channels", not "the run
+from Tuesday". It holds the provider, wantlist and EPG a run should start
+from, plus the accumulated per-channel decisions (group, EPG source, a
+renamed channel) that every later run of the same lineup inherits instead of
+asking again.
+
+probarr never touches your provider's own list — it only reads it. To pick
+up a provider adding, removing, or changing streams, **re-verify the
+lineup** (a button on `/lineups`, or on a schedule — see below) rather than
+starting a brand new run from scratch each time:
+
+- A newly available channel gets picked up, because re-verifying re-matches
+  your wantlist against the provider's *current* catalogue every time, not
+  a cached one from the first run.
+- A channel the provider has dropped shows up as **missing** ("no candidate
+  streams matched") instead of silently vanishing, so a real provider-side
+  loss is visible rather than looking identical to a channel you never
+  asked for.
+- It's cheap, not a blind full redo: a candidate whose stream hasn't
+  changed on the provider's end since its last verdict, within the
+  **freshness window** (`/settings`, default 6 days), is carried straight
+  forward instead of being re-probed. Only genuinely new or changed streams
+  spend a connection.
+
+A lineup can also be set to re-verify itself on a schedule, so this happens
+without you starting it by hand.
+
 ## What the statuses mean
 
 | Status | Meaning |

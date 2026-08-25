@@ -2625,7 +2625,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _curate(self, run_id):
         store = RunStore(self.root, run_id)
-        if not os.path.exists(store.results_path):
+        # Checked against run.json, NOT results.jsonl -- a run whose wantlist
+        # genuinely matched zero streams never writes a results file at all
+        # (there is nothing to append), which made a run that completed
+        # cleanly and found nothing indistinguishable from a run_id that was
+        # never started: both hit this check and returned a bare 404. run.json
+        # is written as the very first thing a run does, before anything can
+        # fail, so its absence is the real "no such run" signal.
+        if not os.path.exists(store.meta_path):
             return self._send("<h1>no such run</h1>", code=404)
         # Warm the group list while the page is being read. Even reused, the
         # first fetch behind a fresh token costs about a second, and the
