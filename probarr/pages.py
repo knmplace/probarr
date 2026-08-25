@@ -7,6 +7,10 @@ WANTLIST_EXTRA = """
   padding:14px 16px;margin-bottom:14px}
 .card h2{margin:0 0 4px;font-size:16px}
 .card .lead{color:var(--dim);font-size:12.5px;margin-bottom:12px}
+.stepnum{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;
+  border-radius:50%;background:var(--accent2);color:#04222c;font-weight:700;font-size:12px;
+  margin-top:16px;vertical-align:middle}
+.stephead{display:inline-block;margin:16px 0 4px 8px;font-size:14px;vertical-align:middle}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 textarea{width:100%;min-height:260px;background:var(--bg);color:var(--text);
   border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;
@@ -77,34 +81,42 @@ __TOPBAR__
       does not. It also decides the channel numbers and names in your exported
       playlist.
     </div>
-    <div class="row">
-      <a href="/wantlists/template.txt" download="probarr-wantlist.txt">
-        <button class="primary">Download template</button></a>
-      <button id="loadtpl">Load template into the editor</button>
-      <label class="muted" style="display:flex;gap:6px;align-items:center">
-        <input type="file" id="file" accept=".txt,.m3u,text/plain" style="display:none">
-        <button id="pick">Import a file&hellip;</button>
-      </label>
-      <span class="muted" id="fileinfo"></span>
+
+    <div class="stepnum">1</div>
+    <h3 class="stephead">Get channel names into the editor</h3>
+    <div class="lead" style="margin-top:0">Pick whichever of these matches what you have.
+      They all add to the editor below rather than replacing it, so more than one can be
+      combined &mdash; e.g. browse your provider first, then top up from an EPG.</div>
+    <div class="row" style="margin-top:8px">
+      <a href="/browse"><button class="primary">Browse a provider's channels</button></a>
+      <span class="muted">no typing, no probing &mdash; tick names from what your provider actually lists</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="epgimportopen">Import channels from an EPG source&hellip;</button>
+      <span class="muted">tick names from a guide someone else already keeps current</span>
     </div>
     <div class="row" style="margin-top:8px">
       <select id="starterselect" style="width:auto"><option value="">Load a starter lineup&hellip;</option></select>
       <span class="muted">Real channel numbering, ready to import &mdash; free-to-air only for now.</span>
     </div>
     <div class="row" style="margin-top:8px">
-      <a href="/browse"><button>Browse a provider's channels instead</button></a>
-      <span class="muted">no typing, no probing &mdash; tick names from what your provider actually lists</span>
+      <button id="loadtpl">Load the blank template</button>
+      <label class="muted" style="display:flex;gap:6px;align-items:center">
+        <input type="file" id="file" accept=".txt,.m3u,text/plain" style="display:none">
+        <button id="pick">Import a file&hellip;</button>
+      </label>
+      <span class="muted" id="fileinfo"></span>
+      <a href="/wantlists/template.txt" download="probarr-wantlist.txt" style="font-size:12px">
+        or just download it to edit by hand&hellip;</a>
     </div>
-    <div class="row" style="margin-top:8px">
-      <button id="epgimportopen">Import channels from an EPG source&hellip;</button>
-      <span class="muted">tick names from a guide someone else already keeps current, adds to
-        whatever's in the editor rather than replacing it</span>
-    </div>
+
+    <div class="stepnum">2</div>
+    <h3 class="stephead">Then enrich it <span class="muted" style="font-weight:400">(optional)</span></h3>
+    <div class="lead" style="margin-top:0">An EPG has no channel numbers or categories &mdash;
+      this cross-references whatever's now in the editor against a real broadcaster lineup
+      (e.g. Sky UK) to fill in what's missing, without touching anything already set.</div>
     <div class="row" style="margin-top:8px">
       <button id="enrichopen">Fill in numbers &amp; groups from a reference lineup&hellip;</button>
-      <span class="muted">an EPG has no channel numbers or categories &mdash; this cross-references
-        the channels already in the editor below against a real broadcaster lineup (e.g. Sky UK)
-        to fill in what's missing, without touching anything already set</span>
     </div>
   </div>
 
@@ -1240,6 +1252,8 @@ __TOPBAR__
       <div class="ctl"><input type="text" id="run_id" placeholder="optional, e.g. my-lineup"></div>
     </div>
 
+    <div class="warn" id="scopewarn" style="display:none"></div>
+
     <div class="startbar">
       <button class="primary" id="start">Start verifying</button>
       <span class="muted" id="startmsg"></span>
@@ -1311,7 +1325,40 @@ async function loadDefaults(){
 function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
   .replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
 
+// The two defaults that most often bite: "All channels" against a
+// provider that's actually a large multi-country catalog probes tens of
+// thousands of candidates, and no Regions filter lets a plainly-named
+// channel match every country's copy of it (the exact incident that
+// motivated runner.py's own after-the-fact log warning -- this is the
+// same check surfaced BEFORE a run starts instead of after candidates
+// have already ballooned).
+function checkScope(){
+  const box = $("scopewarn");
+  const noWantlist = !$("wantlist").value;
+  const noRegions = !$("regions").value.trim();
+  if(noWantlist && noRegions){
+    box.style.display = "";
+    box.innerHTML = "<b>Heads up:</b> \"All channels in the source\" with no " +
+      "Regions filter probes every candidate for every channel your provider " +
+      "lists -- on anything but a small, single-country source this can mean " +
+      "hours instead of minutes, and can match the wrong country's copy of a " +
+      "plainly-named channel. Pick a wantlist above, or set Regions, before starting.";
+  } else if(noWantlist){
+    box.style.display = "";
+    box.innerHTML = "<b>Heads up:</b> \"All channels in the source\" probes every " +
+      "candidate your provider lists, not just the ones you actually want -- fine " +
+      "for a small source, likely to take a very long time on a large one.";
+  } else {
+    box.style.display = "none";
+  }
+}
+$("wantlist").addEventListener("change", checkScope);
+$("regions").addEventListener("input", checkScope);
+
 $("start").addEventListener("click", async ()=>{
+  if($("scopewarn").style.display !== "none" && $("scopewarn").innerHTML &&
+     !confirm("This run may probe far more than you intend -- see the warning " +
+              "above. Start anyway?")) return;
   const provName = $("provider").value;
   if(!provName){ $("startmsg").textContent="Choose a provider first."; return; }
 
@@ -1419,6 +1466,7 @@ function applyLineup(){
          $("epg").value = lu.epg; }
   if(!$("run_id").value.trim()) $("run_id").placeholder = lu.name + "-" +
     new Date().toISOString().slice(0,10);
+  checkScope();
 }
 $("lineup").addEventListener("change", applyLineup);
 
@@ -1426,7 +1474,7 @@ $("lineup").addEventListener("change", applyLineup);
 // it writes into actually have their options, because setting .value on a
 // select with no matching option silently does nothing.
 Promise.all([loadProviders(), loadWantlists(),
-             loadEpgSources().then(loadDefaults)]).then(loadLineups);
+             loadEpgSources().then(loadDefaults)]).then(() => { loadLineups(); checkScope(); });
 </script></body></html>
 """
 

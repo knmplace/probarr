@@ -2563,8 +2563,25 @@ class Handler(BaseHTTPRequestHandler):
         if last and last != full:
             bits.append(f"last pass: {html.escape(last)}")
         if r.get("run_state") == "running":
-            bits.append("running now")
-        return " &middot; ".join(bits) or "not completed yet"
+            # run.json is written by the runner process itself, so a state
+            # of "running" only reflects reality while that exact process
+            # is still alive -- a container restart mid-run (this session's
+            # own deploy process does this routinely) leaves it stuck
+            # reading "running" forever, with no live job to actually
+            # finish it. runs_mod.status() is the in-memory "is a job for
+            # this run_id actually alive right now" check; None means it
+            # isn't, no matter what the file on disk still claims.
+            if runs_mod.status(r["run_id"]):
+                bits.append("running now")
+            else:
+                bits.append('<span style="color:var(--warn)">stalled -- the process '
+                            "that was running this stopped (e.g. a restart) before it "
+                            "finished. Delete it and start again, or Stop then re-run "
+                            "the same lineup.</span>")
+        if bits:
+            return " &middot; ".join(bits)
+        return ('not completed yet -- probably an aborted or empty run; '
+               "safe to Delete if you don't recognise it")
 
     def _index(self):
         runs = RunStore.list_runs(self.root)
