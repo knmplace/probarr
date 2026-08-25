@@ -859,10 +859,12 @@ function renderDetail(){
   const whybox = why.length
     ? '<div class="whybox"><b>Why this needs you</b><ul>'+
       why.map(x=>'<li>'+x+'</li>').join("")+'</ul>'+
-      '<button id="settlebtn" title="Mark this channel settled. It stops '+
-      'being flagged, and the decision is remembered on the lineup so later '+
-      'runs inherit it \u2014 until something about the channel actually '+
-      'changes, when it is flagged again.">This is fine \u2014 stop asking</button>'+
+      '<button id="settlebtn" title="Mark this channel (or a multi-selection) '+
+      'settled. It stops being flagged, and the decision is remembered on '+
+      'the lineup so later runs inherit it \u2014 until something about the '+
+      'channel actually changes, when it is flagged again.">'+
+      (MARKED.size>1 ? 'This is fine \u2014 stop asking ('+MARKED.size+')'
+                     : 'This is fine \u2014 stop asking')+'</button>'+
       '</div>'
     : '';
   // Collapsed by default: a channel with nine real changes filled the
@@ -923,11 +925,15 @@ function renderDetail(){
         'it can sit in another group as well \u2014 same streams, no re-probing.">'+
         'Duplicate</button>'+
         '<button id="includebtn2" title="'+(s.include !== false
-          ? 'Leave this channel out of every export, without deleting its '+
-            'probe results \u2014 the same as pressing x. It stays in this run '+
-            'and can be re-included at any time.'
-          : 'Bring this channel back into every export. Same as pressing x.')+'">'+
-        (s.include !== false ? 'Exclude this channel' : 'Re-include this channel')+'</button>'+
+          ? 'Leave this channel (or a multi-selection) out of every export, '+
+            'without deleting its probe results \u2014 the same as pressing x. '+
+            'It stays in this run and can be re-included at any time.'
+          : 'Bring this channel (or a multi-selection) back into every export. '+
+            'Same as pressing x.')+'">'+
+        (MARKED.size>1
+          ? (s.include !== false ? 'Exclude ('+MARKED.size+')' : 'Re-include ('+MARKED.size+')')
+          : (s.include !== false ? 'Exclude this channel' : 'Re-include this channel'))+
+        '</button>'+
         '<button id="removechanbtn" class="danger" title="Remove this channel from '+
         'the run \u2014 optionally from Dispatcharr too.">Remove</button>'+
         '<span class="muted" id="diagnosemsg"></span>')+
@@ -2009,15 +2015,24 @@ function startRename(){
 // which is what stops one group's push from undoing the other's. Results
 // are copied rather than re-probed, so this costs no provider connections.
 function toggleInclude(){
-  const s = SEL[current] = SEL[current] || {};
-  // Toggle the EFFECTIVE state (include !== false), not the raw stored
-  // value -- s.include is commonly absent (meaning "included"), and
-  // `!s.include` on undefined flips to true, which looks like a no-op but
-  // actually writes an explicit include:true over what was already
-  // implicitly true. Explicitly setting false only when truly toggling
-  // off keeps a channel's selection object minimal when nothing has
-  // really changed about it.
-  s.include = (s.include === false);
+  // Bulk-aware the same way Set group already is: a multi-selection
+  // (Cmd/Ctrl-click several rows) applies to the whole marked set, not
+  // just whichever channel happens to be open. The direction is decided
+  // ONCE from the open channel's current state and applied identically to
+  // every marked channel -- independent per-channel toggling of a mixed
+  // batch (some already excluded, some not) would be unpredictable to
+  // reason about from one click.
+  const keys = MARKED.size > 1 ? [...MARKED] : [current];
+  const currentlyIncluded = (SEL[current] || {}).include !== false;
+  // Toggle the EFFECTIVE state, not the raw stored value -- s.include is
+  // commonly absent (meaning "included"), and `!s.include` on undefined
+  // flips to true, which looks like a no-op but actually writes an
+  // explicit include:true over what was already implicitly true.
+  const newValue = !currentlyIncluded;
+  for(const k of keys){
+    const s = SEL[k] = SEL[k] || {};
+    s.include = newValue;
+  }
   save(); renderList(); renderDetail();
 }
 async function duplicateChannel(){
@@ -2423,12 +2438,20 @@ function fmtLeft(sec){
 // the group and the name -- otherwise the next run asks the same question
 // about the same channel with no memory of having been answered.
 async function settleChannel(){
-  const ch = DATA.channels.find(c=>c.key===current); if(!ch) return;
-  const s = SEL[current] = SEL[current] || {};
-  s.confirmed = true;
-  // Recorded WITH the evidence it was settled on, so a later change can
-  // tell "still fine" from "fine when I looked, different now".
-  s.settled_on = evidenceSig(ch);
+  // Bulk-aware like Set group and Exclude/Re-include: applies to every
+  // marked channel, not just the open one. Unlike those two, each channel
+  // needs its OWN evidence signature -- "settled" is only meaningful
+  // relative to the specific evidence it was settled on, which differs
+  // per channel, so this can't just copy one decision onto the rest.
+  const keys = MARKED.size > 1 ? [...MARKED] : [current];
+  for(const k of keys){
+    const ch = DATA.channels.find(c=>c.key===k); if(!ch) continue;
+    const s = SEL[k] = SEL[k] || {};
+    s.confirmed = true;
+    // Recorded WITH the evidence it was settled on, so a later change can
+    // tell "still fine" from "fine when I looked, different now".
+    s.settled_on = evidenceSig(ch);
+  }
   save();
   renderList(); renderDetail();
 }
