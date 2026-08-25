@@ -35,6 +35,17 @@ import time
 # has barely moved and the provider is being hit for no new information.
 COOLDOWN_SECONDS = 15
 
+# How long to leave a lane's connection slot idle after it was genuinely
+# FULL (every slot -- probes plus live viewers -- in use) and one just
+# freed up, before reusing it. Real, evidenced case this exists for: a
+# provider can accept a new connection into a slot that only just closed
+# server-side and serve it corrupted data (decode errors, no frame ever
+# produced) rather than a clean refusal -- observed directly against a
+# real account, tracing back to genuine client-side connection churn, not
+# a bad stream. Only applies when the lane was actually saturated; a lane
+# with continuous spare capacity never pays this, launches immediately.
+LANE_SETTLE_SECONDS = 5
+
 QUEUED = "queued"
 RUNNING = "running"
 DONE = "done"
@@ -52,7 +63,8 @@ class ProbeQueue:
     # this is a strict superset of the old single-queue behaviour and every
     # existing single-provider setup is unaffected).
     def __init__(self, runner, concurrency=lambda: 1, gap=lambda: 0.4,
-                 journal=None, gate=lambda lane=None: None, lane_limit=None):
+                 journal=None, gate=lambda lane=None: None, lane_limit=None,
+                 viewer_count=lambda lane: 0):
         self._runner = runner              # callable(job) -> result dict
         self._concurrency = concurrency    # callables so settings changes apply live
         self._gap = gap
@@ -72,6 +84,14 @@ class ProbeQueue:
         # callable(lane) -> int, defaults to the global concurrency for any
         # lane with no provider-specific override.
         self._lane_limit = lane_limit or (lambda lane: max(1, int(self._concurrency())))
+        # callable(lane) -> live viewer count sharing this lane's connection
+        # pool (e.g. someone watching via Dispatcharr) -- counted against
+        # the same limit a probe would be, since it is the same provider
+        # connection allowance either way.
+        self._viewer_count = viewer_count
+        # lane -> when a slot in it last freed up while the lane was
+        # genuinely full. See LANE_SETTLE_SECONDS.
+        self._lane_finished_at = {}
 
     # -- durability --------------------------------------------------------
     def _write_journal_locked(self):
@@ -235,15 +255,34 @@ class ProbeQueue:
                         lane = j["payload"].get("lane") or "_default"
                         running_by_lane[lane] = running_by_lane.get(lane, 0) + 1
                 job = None
+                settling = False
                 for candidate in self._pending:
                     lane = candidate["payload"].get("lane") or "_default"
-                    if running_by_lane.get(lane, 0) < max(1, int(self._lane_limit(lane))):
-                        job = candidate
-                        break
+                    limit = max(1, int(self._lane_limit(lane)))
+                    used = running_by_lane.get(lane, 0) + self._viewer_count(lane)
+                    if used >= limit:
+                        continue   # genuinely no free slot in this lane yet
+                    # A free slot exists. If the lane was completely full
+                    # (probes plus viewers) right up until a slot just
+                    # freed, give the provider LANE_SETTLE_SECONDS before
+                    # reusing it -- real, evidenced case: a connection
+                    # accepted too soon after the previous one closed can
+                    # come back corrupted (decode errors, no frame ever
+                    # produced) rather than cleanly refused. A lane that
+                    # had spare capacity all along never hits this: its
+                    # _lane_finished_at entry is either unset or long
+                    # enough ago that the check passes immediately.
+                    since_settle = time.time() - self._lane_finished_at.get(lane, 0)
+                    if since_settle < LANE_SETTLE_SECONDS:
+                        settling = True
+                        continue
+                    job = candidate
+                    break
                 if job is None:
-                    # Every lane with pending work is already at its own
-                    # cap -- nothing to do until one finishes.
-                    self._lock.wait(timeout=0.5)
+                    # Either every lane with pending work is already at its
+                    # own cap, or the only free slots are still settling --
+                    # nothing to do until one finishes or settles.
+                    self._lock.wait(timeout=0.5 if not settling else 1.0)
                     continue
                 self._pending.remove(job)
                 job["state"] = RUNNING
@@ -265,6 +304,19 @@ class ProbeQueue:
             state, reason = FAILED, str(e)[:200]
         finally:
             with self._lock:
+                lane = job["payload"].get("lane") or "_default"
+                # Measured BEFORE this job is removed from _active, i.e.
+                # whether the lane was completely full (this job's own slot
+                # included) at the moment it finished -- that is precisely
+                # the condition LANE_SETTLE_SECONDS exists to protect
+                # against, and it must not apply to a lane that had spare
+                # capacity all along.
+                running_in_lane = sum(1 for j in self._active.values()
+                                      if j["state"] == RUNNING and
+                                      (j["payload"].get("lane") or "_default") == lane)
+                limit = max(1, int(self._lane_limit(lane)))
+                if running_in_lane + self._viewer_count(lane) >= limit:
+                    self._lane_finished_at[lane] = time.time()
                 job["state"] = state
                 self._recent[job["key"]] = (time.time(), state, reason)
                 self._active.pop(job["key"], None)

@@ -2292,7 +2292,7 @@ class Handler(BaseHTTPRequestHandler):
     # gets a holding card or nothing -- results that look exactly like a bad
     # stream and quietly poison the run. Cached briefly because the queue
     # asks before every probe.
-    _gate_cache = {}   # lane -> (checked_at, reason)
+    _live_cache = (0.0, None)   # (checked_at, active_streams()-or-None)
     GATE_TTL = 5.0
 
     # Dispatcharr's event log, cached like the group list and for the same
@@ -2349,13 +2349,55 @@ class Handler(BaseHTTPRequestHandler):
         return data
 
     @classmethod
+    def _live_dispatcharr(cls):
+        """What Dispatcharr is streaming right now, or None if unavailable.
+
+        Shared by _viewer_gate() (should a NEW probe wait at all) and
+        _lane_viewer_count() (how many connections are viewers currently
+        using, for weighing against a lane's real concurrency) -- both ask
+        the identical question, so both read through the same short-lived
+        cache rather than hitting Dispatcharr twice for one decision.
+        """
+        now = time.time()
+        hit = cls._live_cache
+        if hit and (now - hit[0]) < cls.GATE_TTL:
+            return hit[1]
+        live = None
+        try:
+            prov = next((p for p in providers_mod.list_all(cls.root)
+                        if p.get("scheme") == "dispatcharr"), None)
+            if prov:
+                spec = prov["spec"]
+                client = cls._groups_clients.get(spec)
+                if client is None:
+                    client = cls._groups_clients[spec] = client_from_spec(spec)
+                live = client.active_streams()
+        except Exception:
+            live = None
+        cls._live_cache = (now, live)
+        return live
+
+    @classmethod
+    def _lane_viewer_count(cls, lane):
+        """How many live Dispatcharr viewers are using this lane's provider
+        connections right now -- 0 if unknown or nothing is watching.
+
+        Used to weigh a viewer against a probe's OWN connection budget:
+        both draw from the same provider allowance, so a lane's effective
+        available capacity is its real limit minus whatever viewers are
+        already using, not just minus other probes.
+        """
+        live = cls._live_dispatcharr()
+        return live["count"] if live else 0
+
+    @classmethod
     def _viewer_gate(cls, lane=None):
         """None when probing may start, else why it must not.
 
-        Asks Dispatcharr what it is streaming right now. Deliberately fails
-        OPEN: if the check itself errors -- no Dispatcharr saved, instance
-        down, endpoint changed -- probing proceeds as it always did, because
-        a broken safety check must not become a reason nothing can be probed.
+        Deliberately fails OPEN: if the check itself errors -- no
+        Dispatcharr saved, instance down, endpoint changed -- probing
+        proceeds as it always did, because a broken safety check must not
+        become a reason nothing can be probed.
 
         Real bug this fixed: this used to block ALL probing the instant
         Dispatcharr reported ANYONE watching ANYTHING, phrased as "the
@@ -2368,30 +2410,15 @@ class Handler(BaseHTTPRequestHandler):
         assumed single connection. A viewer only has to block probing once
         they've genuinely used up every slot the provider allows.
         """
-        now = time.time()
-        cache_key = lane or "_default"
-        hit = cls._gate_cache.get(cache_key)
-        if hit and (now - hit[0]) < cls.GATE_TTL:
-            return hit[1]
-        reason = None
-        try:
-            prov = next((p for p in providers_mod.list_all(cls.root)
-                        if p.get("scheme") == "dispatcharr"), None)
-            if prov:
-                spec = prov["spec"]
-                client = cls._groups_clients.get(spec)
-                if client is None:
-                    client = cls._groups_clients[spec] = client_from_spec(spec)
-                live = client.active_streams()
-                limit = max(1, int(cls._lane_limit(lane))) if lane else 1
-                if live["count"] >= limit:
-                    what = ", ".join(live["channels"][:3]) or "a channel"
-                    reason = (f"waiting \u2014 {what} is playing, and that's "
-                              f"already using every connection this provider allows")
-        except Exception:
-            reason = None
-        cls._gate_cache[cache_key] = (now, reason)
-        return reason
+        live = cls._live_dispatcharr()
+        if not live:
+            return None
+        limit = max(1, int(cls._lane_limit(lane))) if lane else 1
+        if live["count"] >= limit:
+            what = ", ".join(live["channels"][:3]) or "a channel"
+            return (f"waiting \u2014 {what} is playing, and that's "
+                   f"already using every connection this provider allows")
+        return None
 
     @classmethod
     def _lane_limit(cls, lane):
@@ -2429,7 +2456,8 @@ class Handler(BaseHTTPRequestHandler):
                 gap=lambda: settings_mod.read(cls.root)["gap_seconds"],
                 journal=os.path.join(cls.root, "probe-queue.json"),
                 gate=cls._viewer_gate,
-                lane_limit=cls._lane_limit)
+                lane_limit=cls._lane_limit,
+                viewer_count=cls._lane_viewer_count)
         return cls._pq
 
     # A diagnose pass samples much longer than a normal probe -- long enough

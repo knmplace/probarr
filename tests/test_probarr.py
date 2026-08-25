@@ -296,6 +296,84 @@ class TestProbeQueueGate(unittest.TestCase):
             time_mod.sleep(0.02)
         self.assertIn("mybunny", results)
 
+    def test_settle_gap_applies_only_when_the_lane_was_genuinely_full(self):
+        # User-specified rule: if a lane's connections (probes + live
+        # viewers) are all in use, wait LANE_SETTLE_SECONDS after one frees
+        # before reusing it -- a provider seen live to serve a connection
+        # accepted too soon after the previous one closed as corrupted
+        # (decode errors, no frame produced) rather than cleanly refuse it.
+        # But a lane with genuine spare capacity must never pay this: two
+        # probes running against a 4-connection lane with one viewer still
+        # leaves a free slot, and a third probe should start immediately.
+        import time as time_mod
+        import threading as threading_mod
+        from probarr import probequeue as pq_mod
+        from probarr.probequeue import ProbeQueue
+
+        orig_settle = pq_mod.LANE_SETTLE_SECONDS
+        pq_mod.LANE_SETTLE_SECONDS = 0.3
+        try:
+            release = threading_mod.Event()
+            started = []
+            finished = []
+            def runner(payload):
+                started.append((payload["key"], time_mod.time()))
+                if payload["key"] == "hold":
+                    release.wait(timeout=2)
+                finished.append((payload["key"], time_mod.time()))
+                return {"status": "ok"}
+
+            # limit=2, one viewer -> only ONE probe slot genuinely free.
+            q = ProbeQueue(runner, concurrency=lambda: 2, gap=lambda: 0,
+                           lane_limit=lambda lane: 2, viewer_count=lambda lane: 1)
+            q.submit("hold", {"lane": "L", "key": "hold"})
+            for _ in range(50):
+                if started:
+                    break
+                time_mod.sleep(0.02)
+            self.assertEqual(len(started), 1)   # the lane was already full (1 probe + 1 viewer = 2)
+
+            q.submit("next", {"lane": "L", "key": "next"})
+            release.set()   # "hold" finishes now -- lane was full, settle gap must apply
+            for _ in range(100):
+                if len(started) >= 2:
+                    break
+                time_mod.sleep(0.02)
+            gap = started[1][1] - finished[0][1]
+            self.assertGreaterEqual(gap, pq_mod.LANE_SETTLE_SECONDS * 0.8,
+                                    "next probe started before the settle gap elapsed")
+        finally:
+            pq_mod.LANE_SETTLE_SECONDS = orig_settle
+
+    def test_settle_gap_does_not_apply_when_the_lane_has_spare_capacity(self):
+        import time as time_mod
+        from probarr import probequeue as pq_mod
+        from probarr.probequeue import ProbeQueue
+
+        orig_settle = pq_mod.LANE_SETTLE_SECONDS
+        pq_mod.LANE_SETTLE_SECONDS = 5   # deliberately large -- must not be waited for
+        try:
+            started = []
+            def runner(payload):
+                started.append(payload["key"])
+                return {"status": "ok"}
+
+            # limit=4, one viewer, one probe running at most -> always spare.
+            q = ProbeQueue(runner, concurrency=lambda: 4, gap=lambda: 0,
+                           lane_limit=lambda lane: 4, viewer_count=lambda lane: 1)
+            q.submit("a", {"lane": "L", "key": "a"})
+            q.submit("b", {"lane": "L", "key": "b"})
+            t0 = time_mod.time()
+            for _ in range(100):
+                if len(started) >= 2:
+                    break
+                time_mod.sleep(0.02)
+            self.assertLess(time_mod.time() - t0, 2,
+                            "second probe waited as if the lane were full")
+            self.assertEqual(set(started), {"a", "b"})
+        finally:
+            pq_mod.LANE_SETTLE_SECONDS = orig_settle
+
 
 class TestVerifyStop(Temp):
     def test_should_stop_actually_cuts_a_concurrent_run_short(self):
