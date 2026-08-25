@@ -2469,6 +2469,26 @@ class Handler(BaseHTTPRequestHandler):
     # every stream on the channel. Long enough to see real motion, short
     # enough that it costs almost nothing on a connection-limited provider.
     PREVIEW_SAMPLE_SECONDS = 6
+    # The plain single ↻ re-probe. This used to fall through to the SAME
+    # sample length as a full unattended Verify run (cfg["sample_seconds"],
+    # 8-10s by default) -- a leftover from before the standalone Preview
+    # button was merged into this one (see its docstring above: "a plain
+    # re-probe now updates the status AND gives a watchable clip in one
+    # action, so having both was two buttons for one job"). The merge
+    # carried over the clip capture but never picked up Preview's short
+    # window, so the button that got faster in every other respect stayed
+    # exactly as slow to run.
+    #
+    # A full Verify run needs a longer decode because nobody is watching
+    # it: the corruption-rate math it depends on (see WARMUP_SECONDS /
+    # CORRUPTION_RATE_MAX in probe.py) was tuned against 10-25s samples
+    # specifically to be statistically meaningful unattended. A ↻ click is
+    # the opposite case -- a human is about to look at the resulting frame
+    # themselves right now, and real playback failures are independently
+    # corroborated by Dispatcharr's own stream-switch history. That is
+    # exactly the case PREVIEW_SAMPLE_SECONDS was already proven for, so
+    # reuse it rather than inventing an untested third number.
+    REPROBE_SAMPLE_SECONDS = PREVIEW_SAMPLE_SECONDS
 
     @classmethod
     def _expected_now(cls, record, store=None):
@@ -2533,7 +2553,7 @@ class Handler(BaseHTTPRequestHandler):
         cfg = settings_mod.read(cls.root)
         sample_seconds = (cls.DIAGNOSE_SAMPLE_SECONDS if diagnose
                           else cls.PREVIEW_SAMPLE_SECONDS if preview
-                          else cfg["sample_seconds"])
+                          else cls.REPROBE_SAMPLE_SECONDS)
         try:
             # A clip is now captured on every re-probe, not just Diagnose --
             # it is a stream-copy riding the same single decode already

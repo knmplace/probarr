@@ -796,6 +796,80 @@ class TestProviderDeclined(Temp):
         self.assertNotIn("provider_declined", result)
 
 
+class TestReprobeSampleLength(Temp):
+    """A plain single ↻ re-probe used to inherit the full unattended-Verify
+    sample length (cfg["sample_seconds"], 8-10s by default) -- a leftover
+    from before the standalone Preview button (short, 6s) was merged into
+    it. The merge kept the clip capture but never picked up Preview's short
+    window. A ↻ click is always attended -- a human is about to look at the
+    resulting frame -- and the corruption-rate math a long unattended
+    sample exists for isn't what that click needs.
+    """
+
+    def test_plain_reprobe_uses_the_short_window_not_the_bulk_default(self):
+        import unittest.mock
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+
+        store = RunStore(self.root, "run1")
+        store.append({"rec_key": "C1|s1", "channel_key": "C1", "stream_id": "s1",
+                      "stream_name": "X", "url": "http://x/1", "url_redacted": "",
+                      "group": "", "logo": "", "tvg_id": "", "probed_at": 1})
+
+        seen_opts = []
+
+        def fake_probe(stream, opts, *a, **k):
+            seen_opts.append(opts)
+            return {"status": "ok"}
+
+        with unittest.mock.patch.object(web_mod, "probe", fake_probe), \
+             unittest.mock.patch.object(web_mod.ProbeOptions, "resolved", lambda self: self), \
+             unittest.mock.patch.object(web_mod, "settings_mod") as settings_mock:
+            settings_mock.read.return_value = {
+                "sample_seconds": 10,   # the BULK/Verify default -- must NOT be used
+                "frame_height": 720, "thumb_height": 240}
+            web_mod.Handler.root = self.root
+            result = web_mod.Handler._run_reprobe(
+                {"run_id": "run1", "rec_key": "C1|s1"})
+
+        self.assertNotIn("error", result)
+        self.assertEqual(len(seen_opts), 1)
+        self.assertEqual(seen_opts[0].sample_seconds,
+                         web_mod.Handler.REPROBE_SAMPLE_SECONDS)
+        self.assertEqual(seen_opts[0].sample_seconds,
+                         web_mod.Handler.PREVIEW_SAMPLE_SECONDS)
+        self.assertNotEqual(seen_opts[0].sample_seconds, 10,
+                            "plain re-probe must not use the bulk-verify sample length")
+
+    def test_diagnose_still_uses_its_own_longer_window(self):
+        import unittest.mock
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+
+        store = RunStore(self.root, "run1")
+        store.append({"rec_key": "C1|s1", "channel_key": "C1", "stream_id": "s1",
+                      "stream_name": "X", "url": "http://x/1", "url_redacted": "",
+                      "group": "", "logo": "", "tvg_id": "", "probed_at": 1})
+
+        seen_opts = []
+
+        def fake_probe(stream, opts, *a, **k):
+            seen_opts.append(opts)
+            return {"status": "ok"}
+
+        with unittest.mock.patch.object(web_mod, "probe", fake_probe), \
+             unittest.mock.patch.object(web_mod.ProbeOptions, "resolved", lambda self: self), \
+             unittest.mock.patch.object(web_mod, "settings_mod") as settings_mock:
+            settings_mock.read.return_value = {
+                "sample_seconds": 10, "frame_height": 720, "thumb_height": 240}
+            web_mod.Handler.root = self.root
+            web_mod.Handler._run_reprobe(
+                {"run_id": "run1", "rec_key": "C1|s1", "diagnose": True})
+
+        self.assertEqual(seen_opts[0].sample_seconds,
+                         web_mod.Handler.DIAGNOSE_SAMPLE_SECONDS)
+
+
 class TestReferenceLineups(Temp):
     def _fake_response(self, payload):
         body = json.dumps(payload).encode()
