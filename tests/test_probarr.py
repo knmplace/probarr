@@ -1008,6 +1008,95 @@ class TestReprobeSampleLength(Temp):
                          web_mod.Handler.DIAGNOSE_SAMPLE_SECONDS)
 
 
+class TestPerProviderStreamLimit(unittest.TestCase):
+    """docs/design/per-provider-m3u-accounts.md's first real piece: once a
+    provider has a real Dispatcharr M3U account (not the shared "custom"
+    one), that account's own max_streams should be kept in step too --
+    it's what Dispatcharr enforces against Live TV AND VOD together, which
+    the shared account's limit never could.
+    """
+
+    def _client(self, accounts, patches=None):
+        from probarr.sources.dispatcharr import Dispatcharr
+        c = Dispatcharr("http://x", "u", "p")
+        calls = []
+
+        def fake_api(method, path, body=None):
+            calls.append((method, path, body))
+            if method == "GET" and path == "/api/m3u/accounts/":
+                return accounts
+            if method == "PATCH":
+                acct_id = int(path.strip("/").split("/")[-1])
+                acct = next(a for a in accounts if a["id"] == acct_id)
+                acct.update(body)
+                return acct
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        c.api = fake_api
+        return c, calls
+
+    def test_finds_account_by_exact_server_url_only(self):
+        accounts = [
+            {"id": 1, "name": "custom", "server_url": None, "max_streams": 0},
+            {"id": 10, "name": "BunnyCustom",
+             "server_url": "https://mybunny.tv/client/download.php?u=phgegfxn&p=BmUXAWZPUaQF",  # probarr:allow-secret
+             "max_streams": 4},
+        ]
+        client, _ = self._client(accounts)
+        found = client.find_account_for_source(
+            "https://mybunny.tv/client/download.php?u=phgegfxn&p=BmUXAWZPUaQF")  # probarr:allow-secret
+        self.assertEqual(found["id"], 10)
+
+        # A near-miss (different credentials) must NOT match -- exact
+        # equality only, never a same-host guess.
+        self.assertIsNone(client.find_account_for_source(
+            "https://mybunny.tv/client/download.php?u=someoneelse&p=x"))  # probarr:allow-secret
+
+    def test_enforce_provider_stream_limit_tightens_the_real_account(self):
+        accounts = [{"id": 10, "name": "BunnyCustom",
+                     "server_url": "https://p.tv/m3u", "max_streams": 8}]
+        client, calls = self._client(accounts)
+        client.enforce_provider_stream_limit("https://p.tv/m3u", 4)
+        self.assertEqual(accounts[0]["max_streams"], 4)
+        self.assertTrue(any(m == "PATCH" for m, *_ in calls))
+
+    def test_enforce_provider_stream_limit_never_raises_it(self):
+        accounts = [{"id": 10, "name": "BunnyCustom",
+                     "server_url": "https://p.tv/m3u", "max_streams": 2}]
+        client, calls = self._client(accounts)
+        client.enforce_provider_stream_limit("https://p.tv/m3u", 6)
+        self.assertEqual(accounts[0]["max_streams"], 2)   # unchanged
+        self.assertFalse(any(m == "PATCH" for m, *_ in calls))
+
+    def test_enforce_provider_stream_limit_is_a_noop_with_no_matching_account(self):
+        accounts = [{"id": 1, "name": "custom", "server_url": None, "max_streams": 0}]
+        client, calls = self._client(accounts)
+        client.enforce_provider_stream_limit("https://p.tv/m3u", 4)
+        self.assertFalse(any(m == "PATCH" for m, *_ in calls))
+
+    def test_enforce_provider_stream_limit_ignores_a_non_positive_limit(self):
+        accounts = [{"id": 10, "name": "BunnyCustom",
+                     "server_url": "https://p.tv/m3u", "max_streams": 8}]
+        client, calls = self._client(accounts)
+        client.enforce_provider_stream_limit("https://p.tv/m3u", 0)
+        client.enforce_provider_stream_limit("https://p.tv/m3u", None)
+        self.assertFalse(any(m == "PATCH" for m, *_ in calls))
+
+    def test_shared_custom_account_and_real_account_are_independent(self):
+        # Both get tightened on a push, to their own separate values --
+        # tightening one must not touch the other.
+        accounts = [
+            {"id": 1, "name": "custom", "server_url": None, "max_streams": 0},
+            {"id": 10, "name": "BunnyCustom",
+             "server_url": "https://p.tv/m3u", "max_streams": 8},
+        ]
+        client, _ = self._client(accounts)
+        client.enforce_custom_stream_limit(4)
+        client.enforce_provider_stream_limit("https://p.tv/m3u", 4)
+        self.assertEqual(accounts[0]["max_streams"], 4)
+        self.assertEqual(accounts[1]["max_streams"], 4)
+
+
 class TestReferenceLineups(Temp):
     def _fake_response(self, payload):
         body = json.dumps(payload).encode()

@@ -3350,6 +3350,17 @@ class Handler(BaseHTTPRequestHandler):
             # provider was verified against.
             client.enforce_custom_stream_limit(
                 store.read_meta().get("concurrency"), log=log_lines.append)
+            # If Dispatcharr ALSO has a real M3U account for this exact
+            # provider (see docs/design/per-provider-m3u-accounts.md), keep
+            # its own max_streams in step too -- that account's limit is
+            # what Dispatcharr actually enforces against Live TV playback
+            # AND VOD together, which the shared "custom" account's limit
+            # above can never do since a custom stream is invisible to that
+            # accounting regardless of which account it's filed under. A
+            # no-op when no such account exists yet.
+            client.enforce_provider_stream_limit(
+                prov["spec"], store.read_meta().get("concurrency"),
+                log=log_lines.append)
             summary = dispatcharr_export.push(
                 client, channels, group_name=group_name,
                 default_group_name=default_group_name,

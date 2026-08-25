@@ -307,6 +307,21 @@ class Dispatcharr:
                                     for s in self.paged("/api/channels/streams/")}
         return self._stream_url_map
 
+    def _tighten_max_streams(self, acct, limit, log, why):
+        """Shared ratchet: PATCH `acct.max_streams` down to `limit`, never up.
+
+        Used by both enforce_custom_stream_limit() (the one shared "custom"
+        account) and enforce_provider_stream_limit() (a real per-provider
+        account, see below) -- same operation, same safety property, two
+        different accounts it can apply to.
+        """
+        current = acct.get("max_streams") or 0
+        if current == 0 or current > limit:
+            self.api("PATCH", f"/api/m3u/accounts/{acct['id']}/",
+                     {"max_streams": limit})
+            log(f"  tightened Dispatcharr's {why} max_streams "
+               f"{current} -> {limit} (this run's provider connection limit)")
+
     def enforce_custom_stream_limit(self, limit, log=None):
         """Tighten (never loosen) Dispatcharr's shared "custom" M3U
         account's max_streams to at most `limit`.
@@ -335,6 +350,17 @@ class Dispatcharr:
         conservative limit any pushing provider has stated, which is the
         only safe default across an account nothing else can meaningfully
         scope.
+
+        Still needed even once a provider has a real account (see
+        enforce_provider_stream_limit): get_or_create_custom_stream()
+        already prefers an existing stream by URL over creating a new one
+        (see its docstring), so once a provider's real M3U account has been
+        refreshed by Dispatcharr, most candidates land there automatically
+        with no code change required. But a URL Dispatcharr's own parse
+        doesn't have an exact match for -- confirmed live this is real, not
+        hypothetical, at roughly a 4% rate on one genuine 43,888-URL catalog
+        -- still falls through to a custom stream under the shared account,
+        so its limit still needs to be correct too.
         """
         log = log or (lambda msg: None)
         if not limit or limit <= 0:
@@ -343,12 +369,57 @@ class Dispatcharr:
                     if a.get("name") == "custom"), None)
         if not acct:
             return
-        current = acct.get("max_streams") or 0
-        if current == 0 or current > limit:
-            self.api("PATCH", f"/api/m3u/accounts/{acct['id']}/", {"max_streams": limit})
-            log(f"  tightened Dispatcharr's shared 'custom' M3U account "
-               f"max_streams {current} -> {limit} (this run's provider "
-               f"connection limit)")
+        self._tighten_max_streams(acct, limit, log, "shared 'custom' M3U account")
+
+    def find_account_for_source(self, spec):
+        """The real Dispatcharr M3U account whose server_url is `spec`, if
+        Dispatcharr has one -- the account get_or_create_custom_stream()
+        would already be finding native streams in, if this provider has
+        ever been set up (or corrected) to point at the same source probarr
+        itself is configured with.
+
+        Matched by EXACT string equality only, deliberately. A looser match
+        (same host, ignoring the query string credentials) risks silently
+        tightening the wrong account's limit -- Dispatcharr has no field
+        that says "this account is probarr's mybunny provider", only
+        whatever server_url happens to be saved, so exact match is the only
+        comparison that cannot produce a false positive. If nothing matches
+        exactly, the honest answer is "no such account exists (yet)", not a
+        guess.
+        """
+        return next((a for a in self.api("GET", "/api/m3u/accounts/")
+                    if a.get("server_url") == spec), None)
+
+    def enforce_provider_stream_limit(self, spec, limit, log=None):
+        """Tighten (never loosen) THIS provider's own real M3U account's
+        max_streams to at most `limit`, if Dispatcharr has one matching
+        `spec` (probarr's own provider spec -- see find_account_for_source).
+
+        This is the actual point of docs/design/per-provider-m3u-accounts.md:
+        unlike the shared "custom" account (enforce_custom_stream_limit,
+        above), a provider's own real M3U/Xtream account's max_streams is
+        enforced by Dispatcharr against EVERYTHING drawn from it -- Live TV
+        channel playback and VOD (Movies/TV Shows) alike -- not just
+        whatever probarr happens to push. Ratcheting only, same as the
+        shared account: this account is not shared between different
+        probarr providers the way "custom" is, but it may still have been
+        deliberately set more conservatively for reasons probarr doesn't
+        know about (a paid tier change, a household policy), and silently
+        raising it is never the safe default.
+
+        A no-op, not an error, when no matching account exists -- most
+        providers won't have one until a Dispatcharr account is created or
+        corrected to point at the same source (see the design doc's "step
+        zero"). The shared "custom" account keeps providing the safety net
+        for that case.
+        """
+        log = log or (lambda msg: None)
+        if not limit or limit <= 0:
+            return
+        acct = self.find_account_for_source(spec)
+        if not acct:
+            return
+        self._tighten_max_streams(acct, limit, log, f"'{acct['name']}' M3U account")
 
     def get_or_create_custom_stream(self, name, url):
         """Dispatcharr stream id for `url`, creating a custom stream if needed.
