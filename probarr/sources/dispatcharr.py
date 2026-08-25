@@ -303,8 +303,34 @@ class Dispatcharr:
         needed between pushes.
         """
         if self._stream_url_map is None:
-            self._stream_url_map = {s.get("url"): s["id"]
-                                    for s in self.paged("/api/channels/streams/")}
+            native, custom = {}, {}
+            for s in self.paged("/api/channels/streams/"):
+                url = s.get("url")
+                if not url:
+                    continue
+                (custom if s.get("is_custom") else native)[url] = s["id"]
+            # A native (Dispatcharr's own M3U/Xtream-parsed) stream must
+            # always win over a custom one sharing the same URL -- never
+            # whichever happened to paginate last. Real, live case this
+            # fixes: a channel pushed before its provider had a correctly
+            # configured Dispatcharr account still had its old custom
+            # stream sitting around after the account was fixed. Once
+            # Dispatcharr's own refresh produced a NATIVE stream with the
+            # identical URL, a plain last-write-wins dict comprehension
+            # picked whichever of the two came later in pagination order,
+            # essentially at random -- confirmed live: one channel's four
+            # candidates split 3 custom / 1 native despite all four
+            # existing natively in the corrected account by push time.
+            # Native winning unconditionally is exactly what
+            # get_or_create_custom_stream() exists to prefer in the first
+            # place (see its own docstring); staying on a stale custom
+            # stream once a native one exists is precisely the outcome
+            # docs/design/per-provider-m3u-accounts.md was written to get
+            # away from. The stale custom stream itself is left in place,
+            # not deleted -- dispatcharr_export.py's own documented
+            # never-delete policy -- it just stops being referenced by any
+            # channel once the next push runs.
+            self._stream_url_map = {**custom, **native}
         return self._stream_url_map
 
     def _tighten_max_streams(self, acct, limit, log, why):

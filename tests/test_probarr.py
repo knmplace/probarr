@@ -1008,6 +1008,54 @@ class TestReprobeSampleLength(Temp):
                          web_mod.Handler.DIAGNOSE_SAMPLE_SECONDS)
 
 
+class TestStreamUrlMapPrefersNative(unittest.TestCase):
+    """The other half of the per-provider-accounts story, found while
+    verifying the enforcement fix above against real data: a channel
+    pushed BEFORE its provider had a correctly configured Dispatcharr
+    account keeps an old custom stream around. Once the account is fixed
+    and Dispatcharr's own refresh produces a NATIVE stream with the
+    identical URL, get_or_create_custom_stream()'s lookup must always
+    prefer that native one -- not whichever happened to paginate last.
+    Confirmed live: one real channel's four candidates split 3 custom / 1
+    native despite all four existing natively by push time, purely from
+    dict-comprehension pagination order.
+    """
+
+    def _client(self, streams):
+        from probarr.sources.dispatcharr import Dispatcharr
+        c = Dispatcharr("http://x", "u", "p")
+        c.api = lambda method, path, body=None: None
+        c.paged = lambda path, page_size=1000: streams
+        return c
+
+    def test_native_wins_when_native_is_paginated_first(self):
+        client = self._client([
+            {"id": 100, "url": "http://p/1", "is_custom": False},
+            {"id": 200, "url": "http://p/1", "is_custom": True},
+        ])
+        self.assertEqual(client.stream_url_map()["http://p/1"], 100)
+
+    def test_native_wins_when_custom_is_paginated_first(self):
+        # The order that actually broke it live -- the stale custom row
+        # happened to come later in pagination than the fresh native one.
+        client = self._client([
+            {"id": 200, "url": "http://p/1", "is_custom": True},
+            {"id": 100, "url": "http://p/1", "is_custom": False},
+        ])
+        self.assertEqual(client.stream_url_map()["http://p/1"], 100)
+
+    def test_a_url_that_only_exists_as_custom_still_resolves(self):
+        client = self._client([{"id": 200, "url": "http://p/1", "is_custom": True}])
+        self.assertEqual(client.stream_url_map()["http://p/1"], 200)
+
+    def test_streams_with_no_url_are_skipped_not_crashed_on(self):
+        client = self._client([
+            {"id": 1, "url": None, "is_custom": False},
+            {"id": 2, "url": "http://p/1", "is_custom": False},
+        ])
+        self.assertEqual(client.stream_url_map(), {"http://p/1": 2})
+
+
 class TestPerProviderStreamLimit(unittest.TestCase):
     """docs/design/per-provider-m3u-accounts.md's first real piece: once a
     provider has a real Dispatcharr M3U account (not the shared "custom"
