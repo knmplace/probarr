@@ -41,21 +41,23 @@ Docker is the supported path — it bundles ffmpeg and needs nothing on the host
 identically on Windows, macOS and Linux.
 
 ```bash
-git clone https://github.com/<your-username>/probarr.git
-cd probarr
-docker build -t probarr .
-docker run -d --name probarr -p 7799:7799 -v ./config:/config probarr
+docker run -d --name probarr -p 7799:7799 -v ./config:/config ghcr.io/probarr-dev/probarr:latest
 ```
 
 Then open `http://localhost:7799`.
 
-No image is published to a registry — building it yourself is the supported
-path, since it takes seconds (stdlib only, no dependency resolution) and means
-you're never running someone else's binary. If you'd rather not build locally,
-a GitHub Actions workflow (`.github/workflows/docker-publish.yml`) is included
-that publishes to `ghcr.io/<owner>/probarr` on every push to `main` once
-Actions is enabled on your fork — swap the `docker build` line above for
-`docker pull ghcr.io/<owner>/probarr:latest` if you use that instead.
+The image is built and published straight from this repo's own source by
+GitHub Actions (`.github/workflows/docker-publish.yml`) on every push to
+`main`, so `:latest` is always exactly what's on `main` here — nothing
+hand-uploaded. If you'd rather build it yourself (it takes seconds: stdlib
+only, no dependency resolution) or you're working from your own fork:
+
+```bash
+git clone https://github.com/probarr-dev/probarr.git
+cd probarr
+docker build -t probarr .
+docker run -d --name probarr -p 7799:7799 -v ./config:/config probarr
+```
 
 Runs as a plain script too, if you have `ffmpeg`, `ffprobe` and Python 3.9+:
 there are no Python dependencies at all.
