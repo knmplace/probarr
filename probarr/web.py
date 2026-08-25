@@ -2292,7 +2292,7 @@ class Handler(BaseHTTPRequestHandler):
     # gets a holding card or nothing -- results that look exactly like a bad
     # stream and quietly poison the run. Cached briefly because the queue
     # asks before every probe.
-    _gate_cache = (0.0, None)
+    _gate_cache = {}   # lane -> (checked_at, reason)
     GATE_TTL = 5.0
 
     # Dispatcharr's event log, cached like the group list and for the same
@@ -2349,17 +2349,30 @@ class Handler(BaseHTTPRequestHandler):
         return data
 
     @classmethod
-    def _viewer_gate(cls):
+    def _viewer_gate(cls, lane=None):
         """None when probing may start, else why it must not.
 
         Asks Dispatcharr what it is streaming right now. Deliberately fails
         OPEN: if the check itself errors -- no Dispatcharr saved, instance
         down, endpoint changed -- probing proceeds as it always did, because
         a broken safety check must not become a reason nothing can be probed.
+
+        Real bug this fixed: this used to block ALL probing the instant
+        Dispatcharr reported ANYONE watching ANYTHING, phrased as "the
+        provider allows one connection at a time" -- true for some
+        providers, flatly false for one saved with its own concurrency
+        above 1 (a household deliberately buys a multi-stream account
+        specifically so watching and probing can happen at once). `lane`
+        is the provider this gate is being asked on behalf of; its real
+        limit is what a live viewer is actually competing against, not an
+        assumed single connection. A viewer only has to block probing once
+        they've genuinely used up every slot the provider allows.
         """
         now = time.time()
-        if now - cls._gate_cache[0] < cls.GATE_TTL:
-            return cls._gate_cache[1]
+        cache_key = lane or "_default"
+        hit = cls._gate_cache.get(cache_key)
+        if hit and (now - hit[0]) < cls.GATE_TTL:
+            return hit[1]
         reason = None
         try:
             prov = next((p for p in providers_mod.list_all(cls.root)
@@ -2370,13 +2383,14 @@ class Handler(BaseHTTPRequestHandler):
                 if client is None:
                     client = cls._groups_clients[spec] = client_from_spec(spec)
                 live = client.active_streams()
-                if live["count"] > 0:
+                limit = max(1, int(cls._lane_limit(lane))) if lane else 1
+                if live["count"] >= limit:
                     what = ", ".join(live["channels"][:3]) or "a channel"
-                    reason = (f"waiting \u2014 {what} is playing, and the "
-                              f"provider allows one connection at a time")
+                    reason = (f"waiting \u2014 {what} is playing, and that's "
+                              f"already using every connection this provider allows")
         except Exception:
             reason = None
-        cls._gate_cache = (now, reason)
+        cls._gate_cache[cache_key] = (now, reason)
         return reason
 
     @classmethod

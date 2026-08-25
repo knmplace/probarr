@@ -248,6 +248,55 @@ class TestWantlist(unittest.TestCase):
         self.assertEqual(by_name["Sky Sports F1"].group, "Football")
 
 
+class TestProbeQueueGate(unittest.TestCase):
+    def test_gate_is_called_with_the_next_jobs_lane(self):
+        # Real bug: the viewer gate used to be asked with no arguments at
+        # all, so it had no way to know which provider's connections a live
+        # viewer was actually competing against -- it could only ever
+        # assume a single shared connection, even for a lane saved with
+        # its own higher concurrency. The queue must pass the lane of
+        # whichever job would launch next.
+        import time as time_mod
+        from probarr.probequeue import ProbeQueue
+
+        seen_lanes = []
+        def gate(lane=None):
+            seen_lanes.append(lane)
+            return None   # never block, just observe what we were asked
+
+        results = []
+        def runner(payload):
+            results.append(payload["lane"])
+            return {"status": "ok"}
+
+        q = ProbeQueue(runner, concurrency=lambda: 1, gap=lambda: 0,
+                       gate=gate)
+        q.submit("k1", {"lane": "mybunny"})
+        for _ in range(50):
+            if results:
+                break
+            time_mod.sleep(0.02)
+        self.assertIn("mybunny", results)
+        self.assertIn("mybunny", seen_lanes)
+
+    def test_gate_without_a_lane_parameter_still_works(self):
+        # Backward compatibility: a gate written before the lane argument
+        # existed (just `lambda: None`) must not break the queue.
+        import time as time_mod
+        from probarr.probequeue import ProbeQueue
+
+        results = []
+        q = ProbeQueue(lambda payload: results.append(payload["lane"]) or {"status": "ok"},
+                       concurrency=lambda: 1, gap=lambda: 0,
+                       gate=lambda: None)
+        q.submit("k1", {"lane": "mybunny"})
+        for _ in range(50):
+            if results:
+                break
+            time_mod.sleep(0.02)
+        self.assertIn("mybunny", results)
+
+
 class TestVerifyStop(Temp):
     def test_should_stop_actually_cuts_a_concurrent_run_short(self):
         # Real bug: with concurrency>1, ThreadPoolExecutor.submit() only

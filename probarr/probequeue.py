@@ -52,7 +52,7 @@ class ProbeQueue:
     # this is a strict superset of the old single-queue behaviour and every
     # existing single-provider setup is unaffected).
     def __init__(self, runner, concurrency=lambda: 1, gap=lambda: 0.4,
-                 journal=None, gate=lambda: None, lane_limit=None):
+                 journal=None, gate=lambda lane=None: None, lane_limit=None):
         self._runner = runner              # callable(job) -> result dict
         self._concurrency = concurrency    # callables so settings changes apply live
         self._gap = gap
@@ -192,10 +192,19 @@ class ProbeQueue:
                 if not self._active_running_locked():
                     # Only checked when nothing is in flight -- a probe
                     # already running IS the connection in use, and asking
-                    # then would see itself and deadlock the queue.
+                    # then would see itself and deadlock the queue. The
+                    # lane of the job that would launch next (queue is
+                    # idle here, so that's simply the first one pending)
+                    # is passed through so the gate can weigh a viewer
+                    # against THAT provider's real concurrency, not
+                    # against an assumed single connection.
                     reason = None
+                    next_lane = (self._pending[0]["payload"].get("lane") or "_default"
+                                if self._pending else None)
                     try:
-                        reason = self._gate()
+                        reason = self._gate(next_lane)
+                    except TypeError:
+                        reason = self._gate()   # a gate that predates the lane arg
                     except Exception:
                         reason = None      # never let the check block work
                     self._blocked = reason
