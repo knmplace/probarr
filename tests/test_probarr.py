@@ -144,6 +144,28 @@ class TestWantlist(unittest.TestCase):
         self.assertEqual(warnings2, [])
         self.assertEqual([c.as_dict() for c in chans], [c.as_dict() for c in chans2])
 
+    def test_group_together_collapses_a_scattered_group_into_one_run(self):
+        norm = Normalizer()
+        # News/Sport/News: the second News channel is scattered away from
+        # the first by a Sport channel in between -- group_together must
+        # pull both News channels together into a single contiguous block,
+        # not just leave file order alone.
+        text = "[News]\nBBC News\n[Sport]\nSky Sports F1\n[News]\nSky News\n"
+        chans, _ = wl.parse_detailed(text, norm)
+        grouped = wl.group_together(chans)
+        self.assertEqual([c.name for c in grouped],
+                         ["BBC News", "Sky News", "Sky Sports F1"])
+        rendered = wl.render(grouped)
+        self.assertEqual(rendered.count("[News]"), 1)
+        self.assertEqual(rendered.count("[Sport]"), 1)
+
+    def test_group_together_keeps_relative_order_within_a_group(self):
+        norm = Normalizer()
+        text = "[News]\nBBC News\nSky News\nITV News\n"
+        chans, _ = wl.parse_detailed(text, norm)
+        grouped = wl.group_together(chans)
+        self.assertEqual([c.name for c in grouped], ["BBC News", "Sky News", "ITV News"])
+
     def test_reference_lineup_map_flattens_categories(self):
         data = {"categories": {"News": [{"name": "BBC News", "number": 231}],
                                 "Sport": [{"name": "Sky Sports F1", "number": 401}]}}

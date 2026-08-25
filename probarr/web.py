@@ -399,6 +399,7 @@ class Handler(BaseHTTPRequestHandler):
                                   "application/json", 400)
             channels, warnings = wl.parse_detailed(text, norm)
             channels, matched = wl.enrich_with_reference(channels, ref_map)
+            channels = wl.group_together(channels)
             return self._send(json.dumps({
                 "text": wl.render(channels),
                 "matched": matched,

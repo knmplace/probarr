@@ -343,6 +343,29 @@ def render(channels):
     return "\n".join(lines) + "\n"
 
 
+def group_together(channels):
+    """Reorder so every channel sharing a group sits in one contiguous run.
+
+    parse_detailed() preserves file order, which is right for hand-written
+    lists -- but after enrichment fills in groups from a reference lineup,
+    the SAME group can now be scattered across the file wherever those
+    channels originally happened to fall (e.g. wantlist order, or however
+    an EPG source listed them). That makes render()'s one-header-per-run
+    logic emit the same [Group] repeatedly instead of once, and makes it
+    impossible to select a whole category and delete it in one go. Sorting
+    by group here, stably and keyed on each group's first appearance (not
+    alphabetically -- that would reshuffle a deliberate ordering someone
+    already had), turns it back into one block per group.
+    """
+    order, seen = [], set()
+    for c in channels:
+        if c.group not in seen:
+            seen.add(c.group)
+            order.append(c.group)
+    rank = {g: i for i, g in enumerate(order)}
+    return sorted(channels, key=lambda c: rank[c.group])
+
+
 _REFERENCE_INDEX_URL = ("https://api.github.com/repos/"
                          "PiratesIRC/Dispatcharr-Lineuparr-Plugin/contents/Lineuparr")
 _REFERENCE_RAW_BASE = ("https://raw.githubusercontent.com/"
