@@ -74,6 +74,16 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
 .epgnow .win{color:var(--dim)}
 .epgnow .none{font-style:italic;color:var(--faint)}
 .epgnow .cur{color:var(--accent)}
+.epg-winner{font-size:12.5px;color:var(--text);padding:5px 8px;margin-bottom:4px;
+  border:1px solid var(--line);border-radius:6px;background:var(--bg2);
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.epg-winner.consensus{border-color:var(--accent2)}
+.epg-winner.none{font-style:italic;color:var(--faint);background:transparent}
+.epg-score{color:var(--faint);font-size:11px}
+.epg-consensus-tag{background:var(--accent2);color:#04222c;font-weight:600;
+  font-size:10px;padding:1px 6px;border-radius:8px;text-transform:uppercase}
+.epg-winner-logo{height:18px;width:auto;max-width:60px;object-fit:contain;
+  border-radius:3px;background:#fff;padding:1px}
 /* A list, not a grid. The order of the list IS the channel's stream order,
    which is how Dispatcharr stores a channel anyway -- so what you drag is
    literally what gets pushed, and there is no longer a hard limit of two.
@@ -2203,15 +2213,37 @@ function renderEpgNow(key, d){
     return;
   }
   const chosen = (SEL[key]||{}).epg_source;
-  el.innerHTML = d.sources.map(s2 => {
+  // Which source's own name for this channel actually agrees with what the
+  // channel is called, word for word -- not just whichever is listed
+  // first. Shown even with only one saved source, so the badge means the
+  // same thing regardless of setup: "this is the source in charge of this
+  // channel's guide and logo right now."
+  const w = d.winner;
+  const winnerLine = w
+    ? '<div class="epg-winner' + (w.consensus ? ' consensus' : '') + '" ' +
+      'title="' + (w.consensus
+        ? 'Two or more saved sources independently agree on this match.'
+        : 'Only one saved source matched this channel -- nothing to agree with yet.') +
+      '">Best match: <b>' + esc(w.source) + '</b> → “' + esc(w.guide_name) +
+      '”' + (w.score ? ' <span class="epg-score">(' + w.score +
+      ' matching word' + (w.score===1?'':'s') + ')</span>' : '') +
+      (w.consensus ? ' <span class="epg-consensus-tag">consensus</span>' : '') +
+      (w.logo ? '<img class="epg-winner-logo" src="' + esc(w.logo) +
+        '" alt="" title="This source\'s icon -- only used as this channel\'s logo ' +
+        'if its own M3U stream supplied none.">' : '') +
+      '</div>'
+    : '<div class="epg-winner none">No source matched this channel by name.</div>';
+  el.innerHTML = winnerLine + d.sources.map(s2 => {
     let body;
     if(s2.error) body = '<span class="none">error: '+esc(s2.error)+'</span>';
     else if(!s2.matched) body = '<span class="none">channel not in this source</span>';
     else if(!s2.now) body = '<span class="none">nothing scheduled right now</span>';
     else body = '<span class="now">'+esc(s2.now.title)+'</span>'+
       (s2.now.window?' <span class="win">('+esc(s2.now.window)+')</span>':'');
+    const scoreTag = (s2.matched && s2.score)
+      ? ' <span class="epg-score">'+s2.score+'w</span>' : '';
     return '<div><span class="src'+(s2.source===chosen?' cur':'')+'">'+
-      esc(s2.source)+':</span> '+body+'</div>';
+      esc(s2.source)+':</span> '+body+scoreTag+'</div>';
   }).join("");
 }
 

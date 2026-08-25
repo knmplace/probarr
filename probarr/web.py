@@ -1955,7 +1955,15 @@ class Handler(BaseHTTPRequestHandler):
                     if sel.get("epg_channel_source") and sel.get("epg_channel_id") else None)
         sources = epgcheck_mod.check_all(self.root, name,
                                          top.get("tvg_id") or "", norm, overrides)
-        self._send(json.dumps({"expected": expected, "sources": sources}),
+        # The consensus winner: which saved source's match actually agrees
+        # in NAME with this channel, not just whichever is listed first --
+        # this is what a persistent, always-visible badge on the channel
+        # shows, alongside the per-source "what's on now" list that was
+        # already here. bump_trust=True: this endpoint backs the page's own
+        # per-channel display, a real curation signal, not idle exploration.
+        winner = epgcheck_mod.consensus_winner(sources, root=self.root, bump_trust=True)
+        self._send(json.dumps({"expected": expected, "sources": sources,
+                              "winner": winner}),
                   "application/json")
 
     def _epg_search(self, run_id, source_name, query):
@@ -2904,6 +2912,23 @@ class Handler(BaseHTTPRequestHandler):
                                     if last else None)})
         return out
 
+    def _epg_fallback_logo(self, name, tvg_id):
+        """A logo URL from whichever saved EPG source best matches `name`,
+        for a channel the M3U itself gave no tvg-logo for. None (not an
+        error) when there are no saved sources, none of them match, or the
+        winning match's source carries no icon at all -- all real,
+        unremarkable cases, not something worth logging or interrupting an
+        export over. Best-effort throughout: any exception here (a
+        malformed guide, a source URL that stopped resolving) means "no
+        logo available", never a broken export.
+        """
+        try:
+            sources = epgcheck_mod.check_all(self.root, name, tvg_id, self._norm())
+            winner = epgcheck_mod.consensus_winner(sources, root=self.root)
+            return (winner or {}).get("logo") or ""
+        except Exception:
+            return ""
+
     def _inherited(self, store):
         """Per-channel decisions this run inherits from its lineup, if any.
         Empty dict when the run has no lineup -- unconfigured runs behave
@@ -2977,14 +3002,26 @@ class Handler(BaseHTTPRequestHandler):
             if ch["number"] is None:
                 continue
             fallback = picked[1] if len(picked) > 1 else None
+            chan_tvg_id = tvg.get(ch["key"], "")
+            logo_url = primary.get("logo", "")
+            if not logo_url:
+                # The M3U itself supplied nothing -- fall back to whichever
+                # saved EPG source's own icon best agrees with this
+                # channel's name, per the same word-overlap consensus used
+                # everywhere else EPG sources are compared. Never the other
+                # way around: a provider-supplied logo is kept even when a
+                # trusted EPG source disagrees, since providers' own icons
+                # are usually the more deliberately-chosen of the two, and
+                # this is only meant to fill a genuine gap.
+                logo_url = self._epg_fallback_logo(ch["title"], chan_tvg_id)
             out.append({"key": ch["key"], "number": ch["number"], "name": ch["title"],
-                       "logo_url": primary.get("logo", ""),
+                       "logo_url": logo_url,
                        # A per-channel group set in Curate beats both the
                        # export form's group field and the channel's
                        # existing group -- it is an explicit decision about
                        # THIS channel, which is more specific than either.
                        "group": s.get("group"),
-                       "tvg_id": tvg.get(ch["key"], ""),
+                       "tvg_id": chan_tvg_id,
                        "streams": picked,
                        "primary": primary, "fallback": fallback})
         return out

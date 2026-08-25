@@ -15,6 +15,7 @@ a curator can pick the one that actually lines up with the picture.
 """
 import datetime
 import hashlib
+import json
 import os
 import re
 import time
@@ -30,6 +31,63 @@ from . import epgsources as epgsources_mod
 # Cosmetic only: stripped from what's SHOWN and what gets written into a
 # wantlist, never from guide_id/tvg_id, so EPG matching is unaffected.
 _TRAILING_CC_RE = re.compile(r"\.[a-z]{2}$")
+
+_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def _word_set(name):
+    """Significant words in a name, for the "how much do these two names
+    actually agree" question -- deliberately cruder than Normalizer.key(),
+    which folds a name down to ONE glued identity string built for exact
+    matching, not for counting how many words two DIFFERENT names share.
+    Numbers are kept (not just letters): "ESPN 2" vs "ESPN" should score
+    lower than "ESPN 2" vs "ESPN 2", and stripping digits would hide that.
+    """
+    return {w.upper() for w in _WORD_RE.findall(name or "")}
+
+
+def _trust_path(root):
+    return os.path.join(root, "epg_source_trust.json")
+
+
+def read_trust(root):
+    """{source_name: {"wins": N, "seen": M}} -- how often each saved EPG
+    source's pick has agreed with the word-overlap consensus winner across
+    every channel this has been computed for, versus how often it was in
+    the running at all. Missing or corrupt file reads as empty: this is an
+    advisory tiebreaker, never something a bad read should be allowed to
+    break resolution over.
+    """
+    try:
+        with open(_trust_path(root), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _bump_trust(root, winner_source, all_sources):
+    """Record that `winner_source` won this channel's consensus, and that
+    every source in `all_sources` was in the running for it.
+
+    Best-effort only: a write failure here must never surface as an error
+    to whatever caller triggered a resolution (a page load, an export) --
+    this is a slowly-accumulating hint for future tie-breaks, not data
+    anything currently depends on being correct.
+    """
+    try:
+        trust = read_trust(root)
+        for name in all_sources:
+            entry = trust.setdefault(name, {"wins": 0, "seen": 0})
+            entry["seen"] = entry.get("seen", 0) + 1
+        trust.setdefault(winner_source, {"wins": 0, "seen": 0})
+        trust[winner_source]["wins"] = trust[winner_source].get("wins", 0) + 1
+        tmp = _trust_path(root) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(trust, f)
+        os.replace(tmp, _trust_path(root))
+    except OSError:
+        pass
 
 
 def _display_clean(name):
@@ -291,6 +349,15 @@ def check_all(root, name, tvg_id, normalizer, overrides=None):
     carry this channel at all is visibly distinct from one that does but has
     nothing scheduled at this exact moment.
 
+    Also scores each match: how many significant words the matched guide
+    entry's own name shares with `name` (see _word_set()) -- e.g. "UK: BBC
+    Two" against a guide's "BBC Two Lon" scores 2 ("BBC", "TWO"). This is
+    what lets a caller with more than one saved source prefer whichever one
+    actually agrees with what the channel is called, rather than trusting
+    whichever source happens to be listed first (resolve()'s own ambiguity
+    refusal already rules out the worst guesses, but says nothing about
+    which of several PLAUSIBLE matches is the best one).
+
     `overrides` is an optional {source_name: guide_channel_id} map -- a
     person's manual pick from Check EPG's search, made when the automatic
     resolve() guessed wrong or missed a channel filed under an odd name.
@@ -301,10 +368,11 @@ def check_all(root, name, tvg_id, normalizer, overrides=None):
     sources = epgsources_mod.list_all(root)
     overrides = overrides or {}
     at = datetime.datetime.now(datetime.timezone.utc)
+    own_words = _word_set(name)
     out = []
     for src in sources:
         entry = {"source": src["name"], "matched": False, "now": None, "error": None,
-                "guide_id": None, "guide_name": None}
+                "guide_id": None, "guide_name": None, "score": 0, "logo": None}
         try:
             g = _indexed_guide(src["url"], normalizer, root)
             override_id = overrides.get(src["name"])
@@ -321,7 +389,50 @@ def check_all(root, name, tvg_id, normalizer, overrides=None):
                 entry["guide_id"] = cid
                 names = g.display_names.get(cid) or []
                 entry["guide_name"] = names[0] if names else cid
+                entry["score"] = len(own_words & _word_set(entry["guide_name"]))
+                entry["logo"] = g.icons.get(cid)
         except Exception as e:
             entry["error"] = str(e)[:200]
         out.append(entry)
     return out
+
+
+def consensus_winner(sources, root=None, bump_trust=False):
+    """The single best-matched entry from check_all()'s output, when more
+    than one saved source is configured -- picked by word-overlap score
+    first, then by each source's accumulated trust (see read_trust()) as a
+    tiebreak, then by name for stability.
+
+    `consensus` is true only when at least TWO independently resolving
+    sources agree there is a real match (score >= 1, i.e. they share at
+    least one actual word, not just both nominally "matching" via a bare
+    fuzzy prefix) -- a single source's opinion, however it scored, is never
+    labelled a consensus on its own; there was nothing for it to agree
+    with. With only one saved source at all, there is likewise no
+    consensus to reach -- its answer is simply the only one there is.
+
+    `bump_trust`, when true and `root` is given, records this outcome into
+    the persisted trust file -- callers doing this for real curation
+    decisions (an export, a persistent UI check) should pass it; one-off
+    exploratory calls should not, so a person idly re-checking the same
+    channel five times does not inflate one source's trust five times over
+    for a single real judgement.
+    """
+    matched = [s for s in sources if s.get("matched")]
+    if not matched:
+        return None
+    trust = read_trust(root) if root else {}
+
+    def trust_of(s):
+        t = trust.get(s["source"]) or {}
+        seen = t.get("seen", 0)
+        return (t.get("wins", 0) / seen) if seen else 0.0
+
+    matched.sort(key=lambda s: (-s["score"], -trust_of(s), s["source"]))
+    best = dict(matched[0])
+    agreeing = [s for s in matched if s["score"] >= 1]
+    best["consensus"] = len(agreeing) >= 2
+    best["sources_checked"] = len(sources)
+    if bump_trust and root and len(matched) >= 2:
+        _bump_trust(root, best["source"], [s["source"] for s in matched])
+    return best

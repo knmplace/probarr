@@ -71,6 +71,7 @@ class Guide:
     def __init__(self):
         self.display_names = {}   # channel_id -> [names]
         self.programmes = {}      # channel_id -> [(start, stop, title, desc)]
+        self.icons = {}           # channel_id -> icon url (first one seen)
         self._by_key = {}         # normalised name -> channel_id
 
     # -- loading ------------------------------------------------------------
@@ -100,6 +101,18 @@ class Guide:
                          for e in elem.findall("display-name") if (e.text or "").strip()]
                 if cid and names:
                     g.display_names.setdefault(cid, []).extend(names)
+                # Only ever used as a FALLBACK when a channel's own M3U
+                # carries no tvg-logo at all -- an XMLTV aggregator's icon
+                # is frequently a generic placeholder or simply absent, so
+                # this is never preferred over what the provider itself
+                # supplied. First one seen wins; a channel id repeated
+                # across feeds in the same file is not expected to disagree
+                # with itself on its own icon.
+                if cid and cid not in g.icons:
+                    icon_el = elem.find("icon")
+                    src = (icon_el.get("src") or "").strip() if icon_el is not None else ""
+                    if src:
+                        g.icons[cid] = src
                 elem.clear()
             elif tag == "programme":
                 start = parse_xmltv_time(elem.get("start"))

@@ -1426,6 +1426,122 @@ class TestEpgList(Temp):
         names = sorted(c["guide_name"] for c in out)
         self.assertEqual(names, ["4Seven", "5Star"])
 
+
+class TestEpgSourceConsensus(Temp):
+    """probarr never scored EPG matches against each other or read a
+    guide's own <icon> at all -- both real gaps, not different approaches
+    to something already covered. Word-overlap scoring lets a household
+    running more than one EPG source prefer whichever source's own name
+    for a channel actually agrees with what it's called, and the icon
+    becomes a real (if last-resort) source of a channel's logo.
+    """
+
+    def _guide(self, name, channels):
+        xml = os.path.join(self.root, f"{name}.xml")
+        body = "".join(
+            f'<channel id="{cid}">'
+            f'<display-name>{dname}</display-name>'
+            + (f'<icon src="{icon}"/>' if icon else "") + '</channel>'
+            for cid, dname, icon in channels)
+        with open(xml, "w", encoding="utf-8") as f:
+            f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
+        from probarr import epgsources
+        epgsources.save(self.root, name, "file://" + xml)
+
+    def test_word_set_ignores_punctuation_and_case(self):
+        from probarr.epgcheck import _word_set
+        self.assertEqual(_word_set("UK: BBC Two!"), {"UK", "BBC", "TWO"})
+
+    def test_check_all_scores_by_shared_words_not_just_match_or_not(self):
+        from probarr import epgcheck
+        self._guide("good-guide", [("1", "BBC Two Lon", None)])
+        self._guide("vague-guide", [("2", "BBC Two Lon", None)])
+        out = epgcheck.check_all(self.root, "UK: BBC Two", "", Normalizer())
+        # Both matched the identical entry (same fixture content) -- the
+        # point here is that a real score is attached at all, not zero
+        # regardless of how well the names actually agree.
+        for entry in out:
+            self.assertTrue(entry["matched"])
+            self.assertGreaterEqual(entry["score"], 2)   # "BBC" and "TWO"
+
+    def test_consensus_requires_at_least_two_sources_to_actually_agree(self):
+        from probarr import epgcheck
+        # One source matches well, the other doesn't carry this channel at
+        # all -- a single opinion, however good, is not a consensus.
+        self._guide("has-it", [("1", "BBC Two Lon", None)])
+        self._guide("lacks-it", [("2", "Totally Different Channel", None)])
+        out = epgcheck.check_all(self.root, "UK: BBC Two", "", Normalizer())
+        winner = epgcheck.consensus_winner(out)
+        self.assertIsNotNone(winner)
+        self.assertEqual(winner["source"], "has-it")
+        self.assertFalse(winner["consensus"])
+
+    def test_consensus_true_when_two_sources_independently_agree(self):
+        from probarr import epgcheck
+        self._guide("src-a", [("1", "BBC Two Lon", None)])
+        self._guide("src-b", [("2", "BBC Two North", None)])
+        out = epgcheck.check_all(self.root, "UK: BBC Two", "", Normalizer())
+        winner = epgcheck.consensus_winner(out)
+        self.assertTrue(winner["consensus"])
+
+    def test_logo_is_read_from_the_winning_sources_icon(self):
+        from probarr import epgcheck
+        self._guide("with-icon", [("1", "BBC Two Lon", "https://x/bbctwo.png")])
+        out = epgcheck.check_all(self.root, "UK: BBC Two", "", Normalizer())
+        winner = epgcheck.consensus_winner(out)
+        self.assertEqual(winner["logo"], "https://x/bbctwo.png")
+
+    def test_trust_tiebreaks_equally_scored_sources(self):
+        from probarr import epgcheck
+        # Two sources score identically for this channel -- give one of
+        # them a real track record of winning past consensus checks and
+        # confirm it's preferred over the other, not just whichever comes
+        # first alphabetically.
+        self._guide("aaa-newcomer", [("1", "BBC Two Lon", None)])
+        self._guide("zzz-veteran", [("2", "BBC Two Lon", None)])
+        epgcheck._bump_trust(self.root, "zzz-veteran", ["aaa-newcomer", "zzz-veteran"])
+        for _ in range(9):
+            epgcheck._bump_trust(self.root, "zzz-veteran", ["zzz-veteran"])
+        out = epgcheck.check_all(self.root, "UK: BBC Two", "", Normalizer())
+        winner = epgcheck.consensus_winner(out, root=self.root)
+        self.assertEqual(winner["source"], "zzz-veteran")
+
+    def test_bump_trust_is_best_effort_and_never_raises(self):
+        from probarr import epgcheck
+        # A root that cannot be written to (nonexistent parent) must not
+        # bring down whatever real request triggered this as a side effect.
+        epgcheck._bump_trust("/no/such/directory", "x", ["x"])  # must not raise
+
+    def test_epg_fallback_logo_only_used_when_the_m3u_gave_none(self):
+        # web.py's _resolve_curated(): the M3U's own tvg-logo always wins
+        # when present -- _epg_fallback_logo() is only ever CALLED for a
+        # channel whose primary candidate's logo is falsy in the first
+        # place, so this exercises the fallback resolver itself.
+        from probarr import web as web_mod
+        self._guide("only-guide", [("1", "BBC Two Lon", "https://x/bbctwo.png")])
+        web_mod.Handler.root = self.root
+        handler = web_mod.Handler.__new__(web_mod.Handler)
+        self.assertEqual(
+            handler._epg_fallback_logo("UK: BBC Two", ""),
+            "https://x/bbctwo.png")
+
+    def test_epg_fallback_logo_is_empty_string_not_none_or_error_when_nothing_matches(self):
+        from probarr import web as web_mod
+        web_mod.Handler.root = self.root
+        handler = web_mod.Handler.__new__(web_mod.Handler)
+        self.assertEqual(handler._epg_fallback_logo("Totally Unmatched Channel", ""), "")
+
+
+class TestEpgConsensus(Temp):
+    def _guide(self, channels):
+        xml = os.path.join(self.root, "guide.xml")
+        body = "".join(f'<channel id="{cid}"><display-name>{name}</display-name></channel>'
+                       for cid, name in channels)
+        with open(xml, "w", encoding="utf-8") as f:
+            f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
+        from probarr import epgsources
+        epgsources.save(self.root, "test-guide", "file://" + xml)
+
     def test_display_clean_leaves_ordinary_names_alone(self):
         from probarr import epgcheck
         self.assertEqual(epgcheck._display_clean("BBC One"), "BBC One")
