@@ -248,6 +248,56 @@ class TestWantlist(unittest.TestCase):
         self.assertEqual(by_name["Sky Sports F1"].group, "Football")
 
 
+class TestVerifyStop(Temp):
+    def test_should_stop_actually_cuts_a_concurrent_run_short(self):
+        # Real bug: with concurrency>1, ThreadPoolExecutor.submit() only
+        # queues work and returns immediately, so the submit loop raced
+        # through the ENTIRE worklist (hundreds of items) before a
+        # should_stop() flip from an HTTP request could ever land -- and
+        # the as_completed() loop that followed had no should_stop check at
+        # all, so it unconditionally waited for every queued item to
+        # finish. Stop verifying was a complete no-op on any concurrency>1
+        # run until it had probed everything anyway. Reproduced here with a
+        # slow, mocked probe() and a should_stop that flips after the first
+        # completion -- far fewer than all 40 candidates must run.
+        import time as time_mod
+        from probarr import verify as verify_mod
+        from probarr.sources.base import Stream
+        from probarr.probe import ProbeOptions
+        from probarr.store import RunStore
+
+        store = RunStore(self.root, "run1")
+        store.write_wantlist_raw(
+            [{"number": i, "name": f"C{i}", "key": f"C{i}"} for i in range(40)], [])
+        pools = {f"C{i}": [Stream(id=f"s{i}", name=f"C{i}", url=f"http://x/{i}")]
+                for i in range(40)}
+
+        call_count = [0]
+        def fake_probe(stream, opts, thumb_path, frame_path, crop_path):
+            call_count[0] += 1
+            time_mod.sleep(0.05)
+            return {"status": "ok"}
+
+        stop_after_first = [False]
+        def should_stop():
+            return stop_after_first[0]
+
+        with unittest.mock.patch("probarr.verify.probe", fake_probe):
+            def progress_cb(*a, **k):
+                if call_count[0] >= 1:
+                    stop_after_first[0] = True
+            verify_mod.verify(pools, store, ProbeOptions(), concurrency=4,
+                              gap_seconds=0, should_stop=should_stop,
+                              progress_cb=progress_cb)
+
+        # With 4 workers and a stop flipped after the very first completion,
+        # nowhere near all 40 candidates should have been probed -- the old
+        # code would have run every single one regardless.
+        self.assertLess(call_count[0], 40)
+        meta = store.read_meta()
+        self.assertTrue(meta.get("interrupted"))
+
+
 class TestReferenceLineups(Temp):
     def _fake_response(self, payload):
         body = json.dumps(payload).encode()

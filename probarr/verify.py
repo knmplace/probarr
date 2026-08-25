@@ -297,8 +297,24 @@ def verify(pools, store, opts, concurrency=1, gap_seconds=0.4,
                     interrupted[0] = True
                     break
                 futures.append(pool.submit(one, item))
+            # submit() only queues work -- it returns immediately, so the
+            # loop above races through the ENTIRE work list (hundreds of
+            # candidates, all queued in milliseconds) long before a
+            # should_stop() flip could ever land mid-loop. Real bug this
+            # caused: Stop verifying appeared to do nothing at all on any
+            # concurrency>1 run, because by the time a stop request arrived
+            # every future was already queued, and this loop used to just
+            # wait for every single one of them to finish regardless.
+            # Checking here too, and cancelling whatever hasn't actually
+            # started yet, is what makes Stop take effect promptly instead
+            # of only after the full candidate list drains.
             for f in concurrent.futures.as_completed(futures):
                 f.result()
+                if should_stop and should_stop():
+                    interrupted[0] = True
+                    for pending in futures:
+                        pending.cancel()
+                    break
 
     # Recorded on the store rather than returned, so adding it did not have
     # to change verify()'s return shape for every existing caller.
