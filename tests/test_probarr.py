@@ -374,6 +374,55 @@ class TestProbeQueueGate(unittest.TestCase):
         finally:
             pq_mod.LANE_SETTLE_SECONDS = orig_settle
 
+    def test_same_channel_candidates_never_run_simultaneously(self):
+        # Real, directly-evidenced case: two quality-variant candidates of
+        # ONE channel launched in the same second (genuine lane capacity
+        # to spare -- this isn't the settle-gap case) and both came back
+        # corrupted, while the exact same URL decoded perfectly cleanly in
+        # complete isolation moments later. The provider's per-channel
+        # backend relay, not the account's overall connection count, is
+        # what can't be shared -- so same-channel candidates must queue
+        # behind each other even when the lane itself has room.
+        import time as time_mod
+        import threading as threading_mod
+        from probarr.probequeue import ProbeQueue
+
+        release = threading_mod.Event()
+        running_together = []
+        active = set()
+        lock = threading_mod.Lock()
+        def runner(payload):
+            with lock:
+                active.add(payload["rec_key"])
+                running_together.append(set(active))
+            if payload["rec_key"].startswith("BBCONE|"):
+                release.wait(timeout=2)
+            with lock:
+                active.discard(payload["rec_key"])
+            return {"status": "ok"}
+
+        # Plenty of lane capacity (4) and no viewers -- if this were purely
+        # about lane capacity, both BBCONE candidates would run at once.
+        q = ProbeQueue(runner, concurrency=lambda: 4, gap=lambda: 0,
+                       lane_limit=lambda lane: 4, viewer_count=lambda lane: 0)
+        q.submit("k1", {"lane": "L", "rec_key": "BBCONE|streamA"})
+        q.submit("k2", {"lane": "L", "rec_key": "BBCONE|streamB"})
+        q.submit("k3", {"lane": "L", "rec_key": "BBCTWO|streamC"})
+        for _ in range(50):
+            if len(running_together) >= 2:
+                break
+            time_mod.sleep(0.02)
+        # BBCTWO (a different channel) must be able to run alongside the
+        # first BBCONE candidate -- confirms this isn't just serialising
+        # everything.
+        self.assertTrue(any(len(s) >= 2 for s in running_together),
+                        "a different channel never ran alongside the first")
+        # But no snapshot may ever show BOTH BBCONE candidates active at once.
+        both_bbcone = {"BBCONE|streamA", "BBCONE|streamB"}
+        self.assertFalse(any(both_bbcone.issubset(s) for s in running_together),
+                         "two candidates of the same channel ran simultaneously")
+        release.set()
+
 
 class TestVerifyStop(Temp):
     def test_should_stop_actually_cuts_a_concurrent_run_short(self):

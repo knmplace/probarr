@@ -52,6 +52,19 @@ DONE = "done"
 FAILED = "failed"
 
 
+def _channel_of(payload):
+    """The channel a job's rec_key belongs to ("channel|stream_id" -> "channel").
+
+    Falls back to the whole rec_key (or the submit key) for a payload that
+    somehow has neither -- worst case that just makes two genuinely
+    unrelated jobs share a "channel" bucket and queue behind each other
+    unnecessarily, never the reverse (never lets two same-channel jobs
+    run concurrently by mistake).
+    """
+    rk = payload.get("rec_key") or payload.get("key") or ""
+    return rk.split("|", 1)[0] if rk else id(payload)
+
+
 class ProbeQueue:
     # Idea borrowed from Podium and StreamFlow (both open-source Dispatcharr
     # tools, see their READMEs) after comparing notes with their community:
@@ -250,10 +263,12 @@ class ProbeQueue:
                 # behind each other without blocking a different provider's
                 # jobs sitting later in the same list.
                 running_by_lane = {}
+                running_channels = set()   # {(lane, channel_key)} currently in flight
                 for j in self._active.values():
                     if j["state"] == RUNNING:
                         lane = j["payload"].get("lane") or "_default"
                         running_by_lane[lane] = running_by_lane.get(lane, 0) + 1
+                        running_channels.add((lane, _channel_of(j["payload"])))
                 job = None
                 settling = False
                 for candidate in self._pending:
@@ -262,6 +277,20 @@ class ProbeQueue:
                     used = running_by_lane.get(lane, 0) + self._viewer_count(lane)
                     if used >= limit:
                         continue   # genuinely no free slot in this lane yet
+                    # Even with a free slot, never run two candidates for
+                    # the SAME channel at once. Real, evidenced case: with
+                    # spare lane capacity to spare, two quality-variant
+                    # candidates of one channel launched in the same
+                    # second and both came back corrupted (decode errors,
+                    # no frame), while the exact same URL decoded cleanly
+                    # moments later in complete isolation -- the provider's
+                    # per-CHANNEL backend relay, not the account's overall
+                    # connection count, is what can't be shared. Different
+                    # channels still probe fully in parallel up to the
+                    # lane's real limit; only same-channel candidates queue
+                    # behind each other.
+                    if (lane, _channel_of(candidate["payload"])) in running_channels:
+                        continue
                     # A free slot exists. If the lane was completely full
                     # (probes plus viewers) right up until a slot just
                     # freed, give the provider LANE_SETTLE_SECONDS before
