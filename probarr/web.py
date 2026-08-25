@@ -66,7 +66,7 @@ def _reprobeable_url(record):
     return redacted if redacted and "***" not in redacted else None
 
 
-INDEX = """<!doctype html><html><head><meta charset="utf-8">
+INDEX = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>probarr</title><style>__CSS__
 .runs{max-width:900px;margin:20px auto;padding:0 16px}
@@ -100,9 +100,9 @@ document.addEventListener("click", async e => {
   const btn = e.target.closest("[data-del-run]");
   if (!btn) return;
   const id = btn.dataset.delRun;
-  if (!confirm("Delete run \\"" + id + "\\"? This removes every captured " +
+  if (!confirm("Delete run \"" + id + "\"? This removes every captured " +
                "frame and probe result for it. This cannot be undone.")) return;
-  btn.disabled = true; btn.textContent = "Deleting\\u2026";
+  btn.disabled = true; btn.textContent = "Deleting…";
   const r = await fetch("/api/run/" + encodeURIComponent(id) + "/delete",
                         {method: "POST"});
   const d = await r.json();

@@ -477,13 +477,21 @@ class TestPageTemplates(unittest.TestCase):
     inside a Python string, with escapes the interpreter silently ate."""
 
     def _pages(self):
-        return {"curate": curate.HTML,
+        from probarr import web as web_mod
+        return {"curate": curate.HTML, "runs_index": web_mod.INDEX,
                 **{n: getattr(pages, n) for n in
                    ("WANTLIST_PAGE", "SETTINGS_PAGE", "PROVIDERS_PAGE",
                     "NEWRUN_PAGE", "BROWSE_PAGE", "LINEUPS_PAGE")}}
 
     def test_templates_are_raw_strings(self):
-        for path in ("probarr/curate.py", "probarr/pages.py"):
+        # web.py's INDEX (the runs list) was missed here for a long time --
+        # not raw, and it shipped a genuinely broken confirm() dialog as a
+        # result (a single backslash before an embedded quote got eaten by
+        # Python instead of reaching the browser, throwing a JS SyntaxError
+        # that silently killed the whole script tag -- including the
+        # unrelated Delete button's listener in the same block). Scanning
+        # web.py here too is what would have caught it before it shipped.
+        for path in ("probarr/curate.py", "probarr/pages.py", "probarr/web.py"):
             with open(os.path.join(os.path.dirname(
                     os.path.dirname(os.path.abspath(__file__))), path)) as f:
                 src = f.read()
