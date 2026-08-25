@@ -249,10 +249,32 @@ handing over a subscription.
 Early. The capture-and-stamp engine and contact sheet work; the web UI is
 currently a run browser, with a channel-list-driven curation view in progress.
 
+## Credits
+
+A few ideas here were borrowed outright from other open-source tools in the
+Dispatcharr community, and it's worth naming where from rather than just
+quietly absorbing the idea:
+
+- **[Podium](https://github.com/lpukatch/podium)** (Coffee/lpukatch) — the
+  freshness-window idea (re-verifying skips a candidate whose stream hasn't
+  changed since its last verdict, rather than blindly re-probing everything)
+  and the concept of giving each provider its own concurrency lane instead
+  of one global limit.
+- **[Lineuparr](https://github.com/PiratesIRC/Dispatcharr-Lineuparr-Plugin)**
+  (PiratesIRC) — trailing country-tag detection ("Cartoon Network | US", not
+  just "UK: Cartoon Network"), the staged token-sort fuzzy-matching fallback
+  with adjustable sensitivity, and the starter-lineup-file concept.
+- **[StreamFlow](https://github.com/krinkuto11/streamflow)** (krinkuto11) —
+  per-account concurrency limiting during parallel checks, which shaped how
+  probarr's own lanes are scoped.
+
+None of this is literal ported code — different language, different
+architecture — but the design decisions are theirs first. Go look at what
+they've built; each does real things probarr doesn't.
+
 ## License
 
-TBD — see the note on AGPL in `docs/` before vendoring anything from
-Dispatcharr.
+MIT — see [LICENSE](LICENSE).
 
 ## Getting started (from the browser)
 
