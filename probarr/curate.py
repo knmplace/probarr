@@ -668,7 +668,15 @@ function evidenceSig(ch){
 function state(ch){
   if (ch.missing) return "bad";
   const s = SEL[ch.key]||{};
-  if (!s.include) return "off";
+  // include is absent for the common case (nothing has ever touched this
+  // channel's selection, or a lineup only ever stored OTHER preferences
+  // like group), and absent must mean "included by default" -- matching
+  // web.py's own s.get("include", True). A plain `!s.include` treated
+  // absent the same as explicitly-excluded, which meant EVERY channel
+  // inheriting a lineup preference that only ever set e.g. group (never
+  // include, since nothing needs to) rendered as excluded, with no
+  // exclusion ever having actually happened.
+  if (s.include === false) return "off";
   const clean = (ch.candidates||[]).filter(c=>c.status==="ok");
   // A settled channel is settled only while the evidence it was settled on
   // still holds -- "stop asking" means stop asking, not "stop asking until
@@ -914,17 +922,17 @@ function renderDetail(){
         '<button id="dupchanbtn" title="Make a second copy of this channel so '+
         'it can sit in another group as well \u2014 same streams, no re-probing.">'+
         'Duplicate</button>'+
-        '<button id="includebtn2" title="'+(s.include
+        '<button id="includebtn2" title="'+(s.include !== false
           ? 'Leave this channel out of every export, without deleting its '+
             'probe results \u2014 the same as pressing x. It stays in this run '+
             'and can be re-included at any time.'
           : 'Bring this channel back into every export. Same as pressing x.')+'">'+
-        (s.include ? 'Exclude this channel' : 'Re-include this channel')+'</button>'+
+        (s.include !== false ? 'Exclude this channel' : 'Re-include this channel')+'</button>'+
         '<button id="removechanbtn" class="danger" title="Remove this channel from '+
         'the run \u2014 optionally from Dispatcharr too.">Remove</button>'+
         '<span class="muted" id="diagnosemsg"></span>')+
     '</div>'+
-    (!s.include ? '<div class="offbox">This channel is <b>excluded</b> \u2014 '+
+    (s.include === false ? '<div class="offbox">This channel is <b>excluded</b> \u2014 '+
       'left out of every export until you re-include it.'+
       '<button id="includebtn">Re-include this channel</button></div>' : '') +
     whybox + changed + epg +
@@ -2002,7 +2010,14 @@ function startRename(){
 // are copied rather than re-probed, so this costs no provider connections.
 function toggleInclude(){
   const s = SEL[current] = SEL[current] || {};
-  s.include = !s.include;
+  // Toggle the EFFECTIVE state (include !== false), not the raw stored
+  // value -- s.include is commonly absent (meaning "included"), and
+  // `!s.include` on undefined flips to true, which looks like a no-op but
+  // actually writes an explicit include:true over what was already
+  // implicitly true. Explicitly setting false only when truly toggling
+  // off keeps a channel's selection object minimal when nothing has
+  // really changed about it.
+  s.include = (s.include === false);
   save(); renderList(); renderDetail();
 }
 async function duplicateChannel(){
@@ -2531,7 +2546,7 @@ document.addEventListener("keydown", e=>{
     if(next) toggleUse(next.id);
   }
   else if(e.key==="x"){
-    const s=SEL[current]=SEL[current]||{}; s.include=!s.include;
+    const s=SEL[current]=SEL[current]||{}; s.include=(s.include===false);
     save(); renderList(); renderDetail();
   }
   else if(e.key==="Enter"){
