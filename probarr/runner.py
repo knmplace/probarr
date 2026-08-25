@@ -229,6 +229,22 @@ def _run(store, root, source, wantlist, epg, regions, strict_region, region_tags
 
     total = sum(len(v) for v in pools.values())
     log(f"{len(pools)} channels, {total} candidate streams (concurrency {concurrency})")
+    # Real incident this catches: a run against a genuinely multi-country
+    # catalogue with no Regions filter set matched a plainly-named channel
+    # ("5", "Al Jazeera English") against every country's copy of it, not
+    # just the intended one -- 139 channels pulled 1,203 candidates instead
+    # of a few hundred. Nothing caught it until someone read the log and
+    # did the division by hand. A high average here, with no filter set, is
+    # exactly that signature -- surfaced automatically so a future run
+    # doesn't need a person who happens to already know what "too many
+    # candidates" looks like.
+    if not regions and pools and (total / len(pools)) > 6:
+        log(f"note: {total/len(pools):.1f} candidates per channel on average with "
+            "no Regions filter set -- on a multi-country provider a plainly-named "
+            "channel (e.g. \"5\", \"Al Jazeera English\") can match every "
+            "country's copy of it, not just the one you want. If this run is "
+            "taking far longer than expected, set Regions (e.g. \"UK\") on it "
+            "or its lineup and re-run.")
 
     if wanted:
         store.write_wantlist(wanted, missing)
