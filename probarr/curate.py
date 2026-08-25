@@ -1506,11 +1506,21 @@ async function trackProbes(){
     return (strPoll = setTimeout(trackProbes, 3000));
   }
   if(done < STRWATCH.length){
+    // This used to always say "one connection at a time" and estimate at
+    // 10s each regardless -- wrong for any provider saved with its own
+    // higher concurrency (Settings > provider), which the actual queue
+    // DOES already respect via its per-provider lane limit. The text just
+    // never reflected that. Real running count, observed from the queue
+    // itself, is used both to describe what's actually happening and to
+    // scale the estimate -- a provider probing 4 at once finishes in a
+    // quarter the time a serial one would, and the message should say so.
+    const runningNow = STRWATCH.filter(w=>w.state==="running").length;
+    const remaining = STRWATCH.length-done;
+    const etaSeconds = 10 * Math.ceil(remaining / Math.max(1, runningNow));
     res.className = "mresult show";
     res.textContent = done+" of "+STRWATCH.length+" probed"+
-      (STRWATCH.some(w=>w.state==="running") ? " \u00b7 one running now" : "")+
-      " \u2014 one connection at a time, so this takes about "+
-      (10*(STRWATCH.length-done))+"s more.";
+      (runningNow ? " \u00b7 "+runningNow+" running now" : "")+
+      " \u2014 about "+etaSeconds+"s more.";
   }else{
     res.className = "mresult show good";
     res.textContent = "All "+STRWATCH.length+" probed. Results are on the card.";
@@ -2646,13 +2656,22 @@ function updateDiagSummary(){
     const ch = DATA.channels.find(c=>c.key===k);
     return sum + (ch ? diagCandidateCount(ch, includeDead) : 0);
   }, 0);
-  const secs = total * DIAG_SECONDS_PER_CANDIDATE;
+  // This used to always say "serial, one at a time" and divide by 1
+  // regardless -- wrong for a provider saved with its own concurrency
+  // above 1 (the actual probe queue already respects that, per-provider,
+  // via its lane limit). DATA.meta.concurrency is what THIS run was
+  // started with, the best estimate of the provider's real limit
+  // available here without a fresh lookup -- not perfectly live if the
+  // provider's setting changed since, but far closer than a hardcoded 1.
+  const conc = Math.max(1, DATA.meta.concurrency || 1);
+  const secs = (total * DIAG_SECONDS_PER_CANDIDATE) / conc;
   const eta = secs < 90 ? Math.round(secs)+"s"
             : secs < 3600 ? Math.round(secs/60)+" min"
             : (secs/3600).toFixed(1)+" hr";
   document.getElementById("diag-summary").textContent =
     picked.length ? picked.length+" channel"+(picked.length===1?"":"s")+
-      ", "+total+" probe"+(total===1?"":"s")+" — about "+eta+" (serial, one at a time)"
+      ", "+total+" probe"+(total===1?"":"s")+" — about "+eta+
+      (conc>1 ? " (up to "+conc+" at once)" : " (serial, one at a time)")
       : "nothing selected";
   document.getElementById("diag-go").disabled = !picked.length;
 }
