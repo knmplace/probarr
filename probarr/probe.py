@@ -44,6 +44,21 @@ _CORRUPTION_RE = re.compile(
     r"missing picture|decode_slice|Invalid data|error while decoding",
     re.I)
 
+# The provider actively refused the connection, as distinct from a network
+# fault or a genuinely broken stream. Found by comparing this project's own
+# credited reference tool (PiratesIRC's IPTVChecker) against probarr: that
+# tool detects HTTP 429/403 in ffmpeg/ffprobe's stderr and backs off the
+# whole account, not just the one channel, before hitting the provider
+# again. probarr had no equivalent -- a soft rate-limit or per-channel
+# backend block came back indistinguishable from "responded, but no frame
+# could be decoded", got one fixed 1.5s retry (see retry_empty below), and
+# was reported no differently from a genuinely dead stream. That is exactly
+# the shape of one specific channel's failures being investigated here:
+# the identical URL, probed seconds apart with zero other traffic, gave a
+# hard failure once and a clean decode once.
+_RATE_LIMIT_RE = re.compile(
+    r"\b429\b|Too Many Requests|\b403\b|[Ff]orbidden", re.I)
+
 # A single decode warning during a 10-25s live sample is not evidence of a
 # genuinely bad stream -- a status gate of ">0" was tried first and turned
 # out to flag almost everything: on one real multi-country provider, only
@@ -421,6 +436,11 @@ def capture(url: str, opts: ProbeOptions, thumb_path: str,
     # against a variable sample length, so looking at a channel for longer
     # made it likelier to be condemned.
     window = max(1.0, decoded_for - WARMUP_SECONDS)
+    # Checked over the whole stderr text, not just err_lines: ffmpeg's HTTP
+    # rejection ("Server returned 403 Forbidden") is often the ONLY line
+    # produced before it gives up, and would otherwise never even reach the
+    # progress/error split above.
+    rate_limited = bool(_RATE_LIMIT_RE.search(err_text))
     out = {
         "decode_errors": len(err_lines),
         "corruption_errors": len(corruption),
@@ -431,6 +451,7 @@ def capture(url: str, opts: ProbeOptions, thumb_path: str,
         "error_samples": (steady or corruption)[:5] or err_lines[:5],
         "capture_seconds": round(elapsed, 1),
         "timed_out": bool(failed),
+        "rate_limited": rate_limited,
         "dhash": None,
         "motion": None,
         "motion_frames": 0,
@@ -563,7 +584,14 @@ def probe(stream, opts: ProbeOptions, thumb_path: str,
         # This must never be reported as ok: an earlier version did exactly
         # that, passing a channel that had delivered no frames whatsoever.
         result["status"] = STATUS_NO_FRAME
-        result["reason"] = "responded, but no frame could be decoded"
+        if cap.get("rate_limited"):
+            # Distinct from a genuinely dead/broken stream: the provider
+            # actively refused the connection (HTTP 429/403 in ffmpeg's
+            # stderr), which the caller can act on differently -- see
+            # RateLimitGuard in verify.py.
+            result["reason"] = "provider refused the connection (429/403) -- rate limited, not dead"
+        else:
+            result["reason"] = "responded, but no frame could be decoded"
     elif cap.get("corruption_per_sec", 0) > CORRUPTION_RATE_MAX:
         result["status"] = STATUS_DIRTY
         result["reason"] = (f"{cap['corruption_steady']} corruption errors in "

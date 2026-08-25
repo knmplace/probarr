@@ -474,6 +474,190 @@ class TestVerifyStop(Temp):
         self.assertTrue(meta.get("interrupted"))
 
 
+class TestRateLimitGuard(Temp):
+    """New: probe.py flags HTTP 429/403 in ffmpeg stderr distinctly from a
+    genuinely dead/corrupted stream, and verify.py's RateLimitGuard pauses
+    ALL probing (not just the one channel) when the provider is actively
+    refusing connections -- ported from PiratesIRC's IPTVChecker, which had
+    this and probarr previously did not.
+    """
+
+    def test_probe_detects_429_in_stderr_and_labels_it_distinctly(self):
+        from probarr import probe as probe_mod
+
+        self.assertTrue(probe_mod._RATE_LIMIT_RE.search(
+            "Server returned 429 Too Many Requests"))
+        self.assertTrue(probe_mod._RATE_LIMIT_RE.search(
+            "HTTP error 403 Forbidden"))
+        self.assertFalse(probe_mod._RATE_LIMIT_RE.search(
+            "Connection timed out"))
+        self.assertFalse(probe_mod._RATE_LIMIT_RE.search(
+            "concealing 12 DC coefficients"))
+
+    def test_full_probe_marks_no_frame_as_rate_limited_when_stderr_says_429(self):
+        # Real, evidenced shape from live investigation: metadata succeeds
+        # (ffprobe sees a video stream) but the capture pass gets nothing --
+        # here because the provider actively refused it, not because the
+        # stream is dead. The reason string must say so, distinctly from
+        # the generic "no frame could be decoded".
+        import unittest.mock
+        from probarr import probe as probe_mod
+        from probarr.sources.base import Stream
+
+        opts = probe_mod.ProbeOptions(retry_empty=False)
+        stream = Stream(id="s1", name="Comedy Central", url="http://x/429")
+
+        fake_meta = {"has_video": True, "width": 1920, "height": 1080,
+                    "fps": 50.0, "video_codec": "h264", "video_profile": "",
+                    "pix_fmt": "yuv420p", "audio_codec": "aac",
+                    "audio_channels": 2, "video_variant_count": 1,
+                    "declared_kbps": 0, "container": "mpegts"}
+        fake_cap = {"decode_errors": 0, "corruption_errors": 0,
+                   "corruption_startup": 0, "corruption_steady": 0,
+                   "corruption_per_sec": 0.0, "decoded_seconds": 0.0,
+                   "error_samples": ["Server returned 403 Forbidden"],
+                   "capture_seconds": 0.1, "timed_out": False,
+                   "rate_limited": True, "dhash": None, "motion": None,
+                   "motion_frames": 0, "low_motion": False, "frame32": None,
+                   "low_contrast": False, "measured_kbps": 0,
+                   "sample_duration": 0.0, "thumb": None, "frame": None,
+                   "crop": None, "clip": None}
+
+        with unittest.mock.patch.object(probe_mod, "probe_metadata", return_value=fake_meta), \
+             unittest.mock.patch.object(probe_mod, "capture", return_value=fake_cap):
+            result = probe_mod.probe(stream, opts, "/tmp/t.jpg")
+
+        self.assertEqual(result["status"], probe_mod.STATUS_NO_FRAME)
+        self.assertTrue(result["rate_limited"])
+        self.assertIn("429/403", result["reason"])
+        self.assertNotIn("no frame could be decoded", result["reason"])
+
+    def test_guard_trips_after_threshold_hits_and_pauses_the_caller(self):
+        import time as time_mod
+        from probarr.verify import RateLimitGuard
+
+        guard = RateLimitGuard()
+        guard.BASE_COOLDOWN_SECONDS = 0.3   # keep the test fast
+        guard.TRIP_THRESHOLD = 3
+
+        logged = []
+        for _ in range(3):
+            guard.record_hit(log=logged.append)
+
+        self.assertEqual(guard.trips, 1)
+        self.assertTrue(any("tripped" in m for m in logged))
+
+        start = time_mod.time()
+        guard.wait()
+        elapsed = time_mod.time() - start
+        # Must genuinely have paused for close to the cooldown, not returned
+        # immediately.
+        self.assertGreaterEqual(elapsed, 0.3 * 0.7)
+
+    def test_guard_does_not_trip_below_threshold(self):
+        from probarr.verify import RateLimitGuard
+        guard = RateLimitGuard()
+        guard.record_hit()
+        guard.record_hit()
+        self.assertEqual(guard.trips, 0)
+        # No cooldown active -- must return immediately.
+        import time as time_mod
+        start = time_mod.time()
+        guard.wait()
+        self.assertLess(time_mod.time() - start, 0.05)
+
+    def test_verify_run_pauses_all_probing_when_provider_starts_refusing(self):
+        # End-to-end through verify(): three channels' first candidates all
+        # come back 429-refused in quick succession (below the real
+        # per-channel/per-lane fixes' reach, since this is a DIFFERENT
+        # channel each time) -- the guard must still trip and pause the
+        # 4th probe, proving the pause is account-wide, not per-channel.
+        import time as time_mod
+        import unittest.mock
+        from probarr import verify as verify_mod
+        from probarr.probe import ProbeOptions, STATUS_NO_FRAME
+        from probarr.sources.base import Stream
+        from probarr.store import RunStore
+
+        store = RunStore(self.root, "run1")
+        store.write_wantlist_raw(
+            [{"number": i, "name": f"C{i}", "key": f"C{i}"} for i in range(4)], [])
+        pools = {f"C{i}": [Stream(id=f"s{i}", name=f"C{i}", url=f"http://x/{i}")]
+                for i in range(4)}
+
+        call_times = []
+
+        def fake_probe(stream, opts, thumb_path, frame_path=None, crop_path=None):
+            call_times.append(time_mod.time())
+            if len(call_times) <= 3:
+                return {"status": STATUS_NO_FRAME, "rate_limited": True,
+                       "reason": "provider refused the connection (429/403)"}
+            return {"status": "ok", "rate_limited": False}
+
+        with unittest.mock.patch("probarr.verify.probe", fake_probe), \
+             unittest.mock.patch.object(verify_mod.RateLimitGuard,
+                                        "BASE_COOLDOWN_SECONDS", 0.4), \
+             unittest.mock.patch.object(verify_mod.RateLimitGuard,
+                                        "TRIP_THRESHOLD", 3):
+            verify_mod.verify(pools, store, ProbeOptions(), concurrency=1,
+                              gap_seconds=0)
+
+        self.assertEqual(len(call_times), 4)
+        # The 4th call (past the trip threshold) must land noticeably later
+        # than the first three, which fired back-to-back.
+        gap_before_trip = call_times[2] - call_times[0]
+        gap_after_trip = call_times[3] - call_times[2]
+        self.assertGreater(gap_after_trip, gap_before_trip)
+        self.assertGreaterEqual(gap_after_trip, 0.4 * 0.7)
+
+    def test_concurrent_verify_never_runs_two_candidates_of_the_same_channel(self):
+        # verify.py's concurrency>1 branch had NO per-channel single-flight
+        # equivalent to probequeue.py's -- this is the gap that made the
+        # earlier probequeue-only fix invisible to a real "Verify" run using
+        # several provider slots. Two candidates of ONE channel plus one
+        # candidate of a different channel, concurrency=3: the different
+        # channel may overlap either same-channel candidate, but the two
+        # same-channel candidates must never overlap each other.
+        import threading
+        import time as time_mod
+        import unittest.mock
+        from probarr import verify as verify_mod
+        from probarr.probe import ProbeOptions
+        from probarr.sources.base import Stream
+        from probarr.store import RunStore
+
+        store = RunStore(self.root, "run1")
+        store.write_wantlist_raw(
+            [{"number": 1, "name": "SAME", "key": "SAME"},
+             {"number": 2, "name": "OTHER", "key": "OTHER"}], [])
+        pools = {
+            "SAME": [Stream(id="a", name="SAME-a", url="http://x/a"),
+                    Stream(id="b", name="SAME-b", url="http://x/b")],
+            "OTHER": [Stream(id="c", name="OTHER-c", url="http://x/c")],
+        }
+
+        active = set()
+        overlap_detected = [False]
+        lock = threading.Lock()
+
+        def fake_probe(stream, opts, thumb_path, frame_path=None, crop_path=None):
+            with lock:
+                if stream.id in ("a", "b") and any(s in ("a", "b") for s in active):
+                    overlap_detected[0] = True
+                active.add(stream.id)
+            time_mod.sleep(0.1)
+            with lock:
+                active.discard(stream.id)
+            return {"status": "ok"}
+
+        with unittest.mock.patch("probarr.verify.probe", fake_probe):
+            verify_mod.verify(pools, store, ProbeOptions(), concurrency=3,
+                              gap_seconds=0, clean_target=None)
+
+        self.assertFalse(overlap_detected[0],
+                         "two candidates of the same channel ran simultaneously")
+
+
 class TestReferenceLineups(Temp):
     def _fake_response(self, payload):
         body = json.dumps(payload).encode()

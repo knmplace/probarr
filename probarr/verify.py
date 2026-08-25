@@ -29,6 +29,92 @@ def _safe(s):
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in s)
 
 
+class RateLimitGuard:
+    """Adaptive backoff for a provider that is actively REFUSING connections
+    (HTTP 429/403 seen in ffmpeg/ffprobe's stderr -- see probe.py), as
+    distinct from a genuinely dead or corrupted stream.
+
+    Modelled directly on the equivalent in PiratesIRC's IPTVChecker (already
+    credited in the README for other ideas), which this project's own
+    verification pipeline turned out to have no counterpart for. That gap
+    matters concretely: a probe that comes back "no frame could be decoded"
+    because the provider said 403 looks IDENTICAL, in every field probarr
+    used to record, to one that failed because the channel is genuinely off
+    air. One specific channel's failures were investigated by hand and
+    showed exactly this shape -- the same URL, seconds apart, zero other
+    traffic, one hard failure and one clean decode -- which a fixed retry
+    delay and a per-channel/per-lane concurrency limit (see probequeue.py's
+    LANE_SETTLE_SECONDS) cannot address, because neither is a response to
+    what the provider is actually saying.
+
+    A single instance is shared across an entire verify() run (not
+    per-channel, not per-lane): a provider issuing 429s is asserting
+    something about the ACCOUNT's connection budget, not about one channel,
+    so tripping should pause everything hitting that provider, the same way
+    IPTVChecker's guard is one process-wide singleton rather than one per
+    stream.
+    """
+    WINDOW_SECONDS = 60
+    # Lower than IPTVChecker's default (5): providers seen from this tool
+    # typically permit far fewer concurrent connections in the first place,
+    # so a smaller burst of refusals is already a meaningful signal here.
+    TRIP_THRESHOLD = 3
+    BASE_COOLDOWN_SECONDS = 30
+    MAX_COOLDOWN_SECONDS = 300
+    DECAY_AFTER_SECONDS = 180
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._hit_times = collections.deque()
+        self._cooldown_until = 0.0
+        self._next_cooldown = self.BASE_COOLDOWN_SECONDS
+        self._last_hit_time = 0.0
+        # Exposed for the UI/tests: how many times this run has tripped.
+        self.trips = 0
+
+    def record_hit(self, log=None):
+        now = time.time()
+        with self._lock:
+            self._hit_times.append(now)
+            self._last_hit_time = now
+            cutoff = now - self.WINDOW_SECONDS
+            while self._hit_times and self._hit_times[0] < cutoff:
+                self._hit_times.popleft()
+            if len(self._hit_times) >= self.TRIP_THRESHOLD and now >= self._cooldown_until:
+                cooldown = self._next_cooldown
+                self._cooldown_until = now + cooldown
+                self._next_cooldown = min(self._next_cooldown * 2, self.MAX_COOLDOWN_SECONDS)
+                self._hit_times.clear()
+                self.trips += 1
+                if log:
+                    log(f"  rate-limit guard tripped: provider refused "
+                       f"{self.TRIP_THRESHOLD}+ connections (429/403) within "
+                       f"{self.WINDOW_SECONDS}s -- pausing ALL probing for "
+                       f"{int(cooldown)}s")
+
+    def wait(self, log=None, should_stop=None):
+        with self._lock:
+            now = time.time()
+            if self._last_hit_time and (now - self._last_hit_time) > self.DECAY_AFTER_SECONDS:
+                self._next_cooldown = self.BASE_COOLDOWN_SECONDS
+            remaining = self._cooldown_until - now
+        if remaining <= 0:
+            return
+        if log:
+            log(f"  rate-limit cooldown active -- waiting {int(remaining)}s before next probe")
+        # Re-read _cooldown_until each iteration so a fresh trip that
+        # EXTENDS the cooldown mid-wait is honoured, rather than every
+        # waiting worker resuming on the original (now stale) deadline.
+        while True:
+            with self._lock:
+                remaining = self._cooldown_until - time.time()
+            if remaining <= 0:
+                return
+            if should_stop and should_stop():
+                return
+            time.sleep(min(remaining, 1.0))
+
+
 def _rk(record):
     """Probe identity, tolerating records written before rec_key existed."""
     return record.get("rec_key") or f"{record['channel_key']}|{record['stream_id']}"
@@ -182,6 +268,31 @@ def verify(pools, store, opts, concurrency=1, gap_seconds=0.4,
     work = build_worklist(pools, store, resume, max_candidates_per_channel,
                           prioritise=prioritise)
     started_at = time.time()
+    rate_guard = RateLimitGuard()
+    # Per-channel locks so the concurrency>1 path never runs two candidates
+    # of the SAME channel at once, matching probequeue.py's per-channel
+    # single-flight rule (see its comment for the evidenced reason: two
+    # same-channel candidates launched in the same second both came back
+    # corrupted, while the identical URL decoded cleanly moments later in
+    # isolation). The serial path never needed this -- only one probe runs
+    # at all -- but the concurrent branch below had NO equivalent before
+    # this, despite being the path an operator running with several
+    # provider slots actually uses for a full verify.
+    channel_locks = {}
+    channel_locks_guard = threading.Lock()
+
+    def _channel_lock(key):
+        # defaultdict(threading.Lock) would race two threads seeing the
+        # same missing key at once into creating two DIFFERENT Lock objects
+        # (dict.__setitem__ is atomic, the creation before it is not) --
+        # exactly the same failure mode this lock exists to prevent, just
+        # one level up. Guard the creation itself instead.
+        with channel_locks_guard:
+            lock = channel_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                channel_locks[key] = lock
+            return lock
     # Whether this pass got through its whole worklist, as opposed to being
     # cut short by a budget or a stop request. The distinction matters to a
     # reader of the run list: "finished at 4am" means something very
@@ -193,8 +304,12 @@ def verify(pools, store, opts, concurrency=1, gap_seconds=0.4,
     def one(item):
         key, stream = item
         rk = f"{key}|{stream.id}"
-        result = probe(stream, opts, store.thumb_path(rk),
-                       store.frame_path(rk), store.crop_path(rk))
+        rate_guard.wait(log, should_stop)
+        with _channel_lock(key):
+            result = probe(stream, opts, store.thumb_path(rk),
+                           store.frame_path(rk), store.crop_path(rk))
+        if result.get("rate_limited"):
+            rate_guard.record_hit(log)
 
         # Resolve the expected programme AT PROBE TIME, not at viewing time.
         # The frame and the schedule entry have to describe the same instant
