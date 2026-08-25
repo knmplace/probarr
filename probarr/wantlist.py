@@ -33,8 +33,10 @@ An empty `[]` resets to no group, for channels between two named sections
 that don't belong in either.
 """
 import difflib
+import json
 import os
 import re
+import urllib.request
 
 TEMPLATE = """# probarr wantlist
 #
@@ -339,6 +341,72 @@ def render(channels):
         suffix = f" | {c.tvg_id}" if c.tvg_id else ""
         lines.append(f"{prefix}{c.name}{suffix}")
     return "\n".join(lines) + "\n"
+
+
+_REFERENCE_INDEX_URL = ("https://api.github.com/repos/"
+                         "PiratesIRC/Dispatcharr-Lineuparr-Plugin/contents/Lineuparr")
+_REFERENCE_RAW_BASE = ("https://raw.githubusercontent.com/"
+                        "PiratesIRC/Dispatcharr-Lineuparr-Plugin/main/Lineuparr/")
+_REFERENCE_CACHE_NAME = "reference_lineups_cache.json"
+
+_COUNTRY_NAMES = {
+    "UK": "United Kingdom", "US": "United States", "CA": "Canada",
+    "AU": "Australia", "FR": "France", "ES": "Spain", "NL": "Netherlands",
+    "DE": "Germany", "IT": "Italy", "IE": "Ireland", "NZ": "New Zealand",
+}
+
+
+def _reference_cache_path(root):
+    return os.path.join(store_dir(root), _REFERENCE_CACHE_NAME)
+
+
+def _reference_label(filename):
+    stem = filename[:-len(".json")]
+    for suffix in ("_lineup", "-lineup"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    code, _, rest = stem.partition("_")
+    country = _COUNTRY_NAMES.get(code.upper())
+    if country and rest:
+        return country, rest.replace("_", " ").replace("-", " ").strip()
+    if country:
+        return country, country
+    return "Other", stem.replace("_", " ").replace("-", " ").strip()
+
+
+def known_reference_lineups(root, force=False):
+    """The list of lineups Lineuparr currently publishes on GitHub.
+
+    Discovered live from the repo's own directory listing rather than kept
+    as a hand-maintained list here, so a lineup Lineuparr adds tomorrow
+    shows up without a probarr release -- and one it removes doesn't leave
+    a dead entry in the dropdown. Cached to disk and only re-fetched when
+    asked (force=True), both to be a polite, low-frequency GitHub API
+    caller and so the operator sees a stable list rather than it silently
+    reordering itself mid-session.
+    """
+    cache_path = _reference_cache_path(root)
+    if not force and os.path.exists(cache_path):
+        with open(cache_path, encoding="utf-8") as f:
+            return json.load(f)
+    req = urllib.request.Request(_REFERENCE_INDEX_URL,
+                                  headers={"User-Agent": "probarr/0.1",
+                                           "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        entries = json.loads(resp.read())
+    items = []
+    for e in entries:
+        name = e.get("name", "")
+        if not name.endswith(".json") or name in ("plugin.json",):
+            continue
+        region, label = _reference_label(name)
+        items.append({"file": name, "url": _REFERENCE_RAW_BASE + name,
+                      "region": region, "label": label})
+    items.sort(key=lambda i: (i["region"], i["label"]))
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(items, f)
+    return items
 
 
 def reference_lineup_map(data, normalizer):

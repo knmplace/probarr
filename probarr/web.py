@@ -195,6 +195,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(json.dumps({"error": str(e)[:200]}), "application/json", 404)
             return self._send(json.dumps({"channels": channels}), "application/json")
+        if path == "/api/wantlists/reference-lineups":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            force = qs.get("refresh", ["0"])[0] == "1"
+            try:
+                items = wl.known_reference_lineups(self.root, force=force)
+            except Exception as e:
+                return self._send(json.dumps({"error": str(e)[:200]}), "application/json", 502)
+            return self._send(json.dumps({"lineups": items}), "application/json")
         if path == "/api/wantlists/starters":
             return self._send(json.dumps({"starters": wl.list_starters()}),
                               "application/json")

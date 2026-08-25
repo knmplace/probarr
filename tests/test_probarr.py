@@ -16,6 +16,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -155,6 +156,13 @@ class TestWantlist(unittest.TestCase):
         with self.assertRaises(ValueError):
             wl.reference_lineup_map({"channels": []}, Normalizer())
 
+    def test_reference_label_splits_country_and_package(self):
+        self.assertEqual(wl._reference_label("UK_SkyTV_lineup.json"),
+                          ("United Kingdom", "SkyTV"))
+        self.assertEqual(wl._reference_label("US_DISH-Top250_lineup.json"),
+                          ("United States", "DISH Top250"))
+        self.assertEqual(wl._reference_label("plugin.json")[0], "Other")
+
     def test_enrich_only_fills_gaps_never_overwrites(self):
         norm = Normalizer()
         # "BBC News" has no number/group and should be filled; "Sky Sports F1"
@@ -171,6 +179,33 @@ class TestWantlist(unittest.TestCase):
         self.assertEqual(by_name["BBC News"].group, "News")
         self.assertEqual(by_name["Sky Sports F1"].number, 999)
         self.assertEqual(by_name["Sky Sports F1"].group, "Football")
+
+
+class TestReferenceLineups(Temp):
+    def _fake_response(self, payload):
+        body = json.dumps(payload).encode()
+        cm = unittest.mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = body
+        return cm
+
+    def test_discovers_and_caches_the_repo_listing(self):
+        listing = [{"name": "UK_SkyTV_lineup.json"}, {"name": "plugin.json"}]
+        with unittest.mock.patch("probarr.wantlist.urllib.request.urlopen",
+                                  return_value=self._fake_response(listing)) as m:
+            items = wl.known_reference_lineups(self.root)
+            self.assertEqual(len(items), 1)   # plugin.json excluded
+            self.assertEqual(items[0]["region"], "United Kingdom")
+            m.assert_called_once()
+            # Second call must hit the on-disk cache, not fetch again.
+            wl.known_reference_lineups(self.root)
+            m.assert_called_once()
+
+    def test_refresh_forces_a_new_fetch(self):
+        with unittest.mock.patch("probarr.wantlist.urllib.request.urlopen",
+                                  return_value=self._fake_response([])) as m:
+            wl.known_reference_lineups(self.root)
+            wl.known_reference_lineups(self.root, force=True)
+            self.assertEqual(m.call_count, 2)
 
 
 class TestRank(unittest.TestCase):

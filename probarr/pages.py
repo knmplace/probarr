@@ -112,17 +112,19 @@ __TOPBAR__
     <div class="modalbox" style="width:min(560px,94vw)">
       <button class="modalx" id="enrich-x" title="Close">&#10005;</button>
       <h3>Fill in numbers &amp; groups from a reference lineup</h3>
-      <div class="sub">Paste the URL of a lineup JSON in the
-        <code>{"categories": {"Group": [{"name": "...", "number": N}, ...]}}</code>
-        shape &mdash; e.g. one of the
+      <div class="sub">Known lineups are pulled from the
         <a href="https://github.com/PiratesIRC/Dispatcharr-Lineuparr-Plugin/tree/main/Lineuparr"
-           target="_blank" rel="noopener">Lineuparr project's published lineups</a> on GitHub.
-        Only fetched, never stored here. Matches by name against the channels already in the
-        editor below; only fills a number or group that's currently blank &mdash; anything you've
-        already set (here or in a prior curated run) is left alone.</div>
-      <div class="mfield" style="margin:10px 0">
+           target="_blank" rel="noopener">Lineuparr project</a> &mdash; fetched fresh each time,
+        nothing stored here. Matches by name against the channels already in the editor below;
+        only fills a number or group that's currently blank &mdash; anything you've already set
+        (here or in a prior curated run) is left alone.</div>
+      <div class="row" style="margin:10px 0">
+        <select id="enrich-select" style="flex:1"></select>
+        <button id="enrich-refresh" title="Re-fetch the list from GitHub">Refresh list</button>
+      </div>
+      <div class="mfield" id="enrich-url-row" style="margin:10px 0; display:none">
         <input type="text" id="enrich-url" style="width:100%"
-          placeholder="https://raw.githubusercontent.com/.../UK_SkyTV_lineup.json">
+          placeholder="https://raw.githubusercontent.com/.../lineup.json">
       </div>
       <div class="mresult" id="enrich-result"></div>
       <div class="mrow">
@@ -368,15 +370,54 @@ $("epgimp-add").addEventListener("click", () => {
 });
 
 // --- Fill in numbers/groups from a reference lineup ----------------------
+async function loadEnrichSelect(force){
+  const sel = $("enrich-select");
+  sel.innerHTML = '<option value="">Loading&hellip;</option>';
+  try{
+    const r = await fetch("/api/wantlists/reference-lineups" + (force ? "?refresh=1" : ""));
+    const d = await r.json();
+    if(!r.ok || d.error){
+      sel.innerHTML = '<option value="">Choose a lineup&hellip;</option>'+
+        '<option value="__custom__">Custom URL&hellip;</option>';
+      $("enrich-result").innerHTML = '<div class="warn">Could not list known lineups: '+
+        esc(d.error||"failed")+' &mdash; use Custom URL instead.</div>';
+      sel.value = "__custom__";
+      $("enrich-url-row").style.display = "";
+      return;
+    }
+    const byRegion = {};
+    for(const item of d.lineups||[])
+      (byRegion[item.region] = byRegion[item.region] || []).push(item);
+    let html = '<option value="">Choose a lineup&hellip;</option>';
+    for(const region of Object.keys(byRegion).sort()){
+      html += '<optgroup label="'+esc(region)+'">';
+      for(const item of byRegion[region])
+        html += '<option value="'+esc(item.url)+'">'+esc(item.label)+'</option>';
+      html += '</optgroup>';
+    }
+    html += '<option value="__custom__">Custom URL&hellip;</option>';
+    sel.innerHTML = html;
+  }catch(e){
+    sel.innerHTML = '<option value="">Choose a lineup&hellip;</option>'+
+      '<option value="__custom__">Custom URL&hellip;</option>';
+  }
+}
+$("enrich-select").addEventListener("change", () => {
+  const custom = $("enrich-select").value === "__custom__";
+  $("enrich-url-row").style.display = custom ? "" : "none";
+});
+$("enrich-refresh").addEventListener("click", () => loadEnrichSelect(true));
 $("enrichopen").addEventListener("click", () => {
+  loadEnrichSelect(false);
   $("enrich-result").innerHTML = "";
   $("enrichmodal").classList.add("on");
 });
 $("enrich-x").addEventListener("click", () => $("enrichmodal").classList.remove("on"));
 $("enrich-close").addEventListener("click", () => $("enrichmodal").classList.remove("on"));
 $("enrich-go").addEventListener("click", async () => {
-  const url = $("enrich-url").value.trim();
-  if(!url){ $("enrich-result").innerHTML = '<div class="warn">Paste a lineup URL first.</div>'; return; }
+  const sel = $("enrich-select").value;
+  const url = sel === "__custom__" ? $("enrich-url").value.trim() : sel;
+  if(!url){ $("enrich-result").innerHTML = '<div class="warn">Choose a lineup, or pick "Custom URL…" and paste one.</div>'; return; }
   $("enrich-go").disabled = true; $("enrich-go").textContent = "fetching…";
   try{
     const r = await fetch("/api/wantlists/enrich", {method:"POST",
