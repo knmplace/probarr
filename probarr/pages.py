@@ -260,12 +260,24 @@ async function loadEpgImportList(){
 function renderEpgImportList(){
   const q = $("epgimp-q").value.trim().toLowerCase();
   const box = $("epgimp-list");
-  const rows = EPGIMP_CHANNELS.filter(c => !q || c.guide_name.toLowerCase().includes(q));
-  box.innerHTML = rows.map(c =>
-    '<label class="cat-hit"><input type="checkbox" class="epgimp-pick" '+
-    'data-name="'+esc(c.guide_name)+'" data-id="'+esc(c.guide_id)+'">'+
-    '<span class="k">'+esc(c.guide_name)+'</span></label>').join("") ||
-    '<div class="muted" style="padding:6px">no channels match</div>';
+  const rows = EPGIMP_CHANNELS.filter(c => !q || c.guide_name.toLowerCase().includes(q) ||
+    (c.alts||[]).some(a => a.guide_name.toLowerCase().includes(q)));
+  box.innerHTML = rows.map(c => {
+    // Regional variants (alts) share one row and one checkbox -- the
+    // dropdown picks WHICH region's id/name the tick actually uses,
+    // rather than making you tick through 15 near-identical rows to
+    // find your own. The checkbox itself carries whichever is picked.
+    const opts = c.alts ? [c, ...c.alts] : null;
+    const picker = opts ? '<select class="epgimp-region" style="width:auto;margin-left:8px" '+
+      'onclick="event.stopPropagation()">' + opts.map((o,i) =>
+        '<option value="'+i+'" data-name="'+esc(o.guide_name)+'" data-id="'+esc(o.guide_id)+'">'+
+        esc(o.guide_name)+'</option>').join("") + '</select>' : '';
+    return '<div class="cat-hit" style="cursor:default">'+
+      '<label style="display:flex;flex:1;gap:9px;align-items:center;cursor:pointer">'+
+      '<input type="checkbox" class="epgimp-pick" '+
+      'data-name="'+esc(c.guide_name)+'" data-id="'+esc(c.guide_id)+'">'+
+      '<span class="k">'+esc(c.guide_name)+'</span></label>'+picker+'</div>';
+  }).join("") || '<div class="muted" style="padding:6px">no channels match</div>';
   updateEpgImportCount();
 }
 function updateEpgImportCount(){
@@ -299,6 +311,13 @@ $("epgimp-src").addEventListener("change", loadEpgImportList);
 $("epgimp-q").addEventListener("input", renderEpgImportList);
 $("epgimp-list").addEventListener("change", e => {
   if(e.target.classList.contains("epgimp-pick")) updateEpgImportCount();
+  if(e.target.classList.contains("epgimp-region")){
+    const opt = e.target.selectedOptions[0];
+    const cb = e.target.closest(".cat-hit").querySelector(".epgimp-pick");
+    cb.dataset.name = opt.dataset.name;
+    cb.dataset.id = opt.dataset.id;
+    cb.nextElementSibling.textContent = opt.dataset.name;
+  }
 });
 $("epgimp-all").addEventListener("click", () => {
   document.querySelectorAll(".epgimp-pick").forEach(x => x.checked = true);

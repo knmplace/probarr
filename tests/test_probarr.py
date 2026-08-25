@@ -271,25 +271,53 @@ class TestStore(Temp):
 
 
 class TestEpgList(Temp):
-    def test_collapses_sd_hd_pairs_but_keeps_real_regional_variants(self):
-        from probarr import epgcheck, epgsources
+    def _guide(self, channels):
         xml = os.path.join(self.root, "guide.xml")
+        body = "".join(f'<channel id="{cid}"><display-name>{name}</display-name></channel>'
+                       for cid, name in channels)
         with open(xml, "w", encoding="utf-8") as f:
-            f.write("""<?xml version="1.0"?><tv>
-                <channel id="1"><display-name>BBC One</display-name></channel>
-                <channel id="2"><display-name>BBC One HD</display-name></channel>
-                <channel id="3"><display-name>BBC One London</display-name></channel>
-                <channel id="4"><display-name>BBC One North West</display-name></channel>
-            </tv>""")
+            f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
+        from probarr import epgsources
         epgsources.save(self.root, "test-guide", "file://" + xml)
+
+    def test_collapses_sd_hd_pairs_to_one_row(self):
+        from probarr import epgcheck
+        self._guide([("1", "BBC One"), ("2", "BBC One HD")])
         out = epgcheck.list_channels(self.root, "test-guide", Normalizer())
-        names = sorted(c["guide_name"] for c in out)
-        # "BBC One" and "BBC One HD" are the same channel -- one row, the
-        # plain (shorter, less qualified) name wins as the representative.
-        # "BBC One London" and "BBC One North West" are genuinely different
-        # regional feeds -- neither the wantlist parser nor this collapses
-        # those, so both keep their own row.
-        self.assertEqual(names, ["BBC One", "BBC One London", "BBC One North West"])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["guide_name"], "BBC One")
+
+    def test_groups_real_regional_variants_under_one_row_with_alts(self):
+        from probarr import epgcheck
+        self._guide([("1", "BBC One London"), ("2", "BBC One North West"),
+                     ("3", "BBC One Scotland")])
+        out = epgcheck.list_channels(self.root, "test-guide", Normalizer())
+        # Nothing is discarded -- one row for the whole family, every
+        # region (including the representative itself) still reachable:
+        # the representative plus two alts covers all three variants.
+        self.assertEqual(len(out), 1)
+        row = out[0]
+        self.assertIn("alts", row)
+        self.assertEqual(len(row["alts"]) + 1, 3)
+
+    def test_ordinary_names_are_not_mistaken_for_a_glued_region_suffix(self):
+        # Regression: "Sky One" was being stripped to "Sky O" because "NE"
+        # (North East) matched its own trailing two letters with no
+        # boundary check. Glued region+quality suffixes ("EastHD") DO need
+        # to strip with no space, so the fix can't just require a plain
+        # word boundary -- it has to tell "glued-on tag" apart from
+        # "coincidentally ends in the same letters".
+        from probarr import epgcheck
+        self.assertEqual(epgcheck._strip_region("Sky One"), "Sky One")
+        self.assertEqual(epgcheck._strip_region("BBC One EastHD"), "BBC One")
+
+    def test_unrelated_channels_are_never_grouped_together(self):
+        from probarr import epgcheck
+        self._guide([("1", "BBC One London"), ("2", "ITV1 London")])
+        out = epgcheck.list_channels(self.root, "test-guide", Normalizer())
+        self.assertEqual(len(out), 2)
+        for row in out:
+            self.assertNotIn("alts", row)
 
 
 class TestBackup(Temp):

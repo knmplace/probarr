@@ -135,35 +135,114 @@ def search_source(root, source_name, query, normalizer, limit=25):
             for cid, name in g.search(query, limit=limit)]
 
 
-def list_channels(root, source_name, normalizer=None):
-    """Every DISTINCT channel one saved EPG source declares -- {guide_id,
-    guide_name} for each, sorted by name. The bulk counterpart to
-    search_source(): this exists so a wantlist can be BUILT from a guide's
-    own channel list (tick what you want) instead of only checked against
-    one, reusing a guide someone else has already kept current rather than
-    hand-typing a text file from scratch.
+# UK regional-opt-out abbreviations, as broadcasters actually abbreviate
+# them in a channel list (BBC One/Two, ITV each carry ~15 of these; Sky's
+# own guide names are the confirmed source for several of these exact
+# spellings). Best-effort and expandable, not exhaustive -- a family this
+# doesn't recognise just falls back to one row per variant, same as before
+# this existed, rather than failing.
+_REGION_WORDS = [
+    "CHANNEL ISLANDS", "CI", "EAST MIDLANDS", "EMID", "EAST", "LONDON", "LON",
+    "NORTH EAST", "NORTHEAST", "NE", "NORTHERN IRELAND", "NI", "NORTH WEST",
+    "NORTHWEST", "NW", "SCOTLAND", "SCOT", "SOUTH EAST", "SOUTHEAST", "SE",
+    "SOUTH WEST", "SOUTHWEST", "SW", "SOUTH", "STH", "WALES", "WAL",
+    "WEST MIDLANDS", "WM", "WEST", "WST", "YORKS AND LINCS", "Y&L",
+    "YORKSHIRE", "YORKS", "YKS",
+]
+_REGION_RE = None   # built lazily, once, from _REGION_WORDS
+_QUALITY_RE = None  # built lazily, once, from normalize.QUALITY_TAGS
 
-    "Distinct" is doing real work here: a guide commonly lists the same
-    channel twice under different SIDs for SD and HD ("BBC One" and "BBC
-    One HD"), which are not two channels to a wantlist -- probarr already
-    picks the best available quality among a channel's candidates once
-    streams are matched, so offering both as separate tickable rows just
-    means one gets picked twice under two different keys. Collapsed here
-    with the SAME normaliser that already folds "BBC One HD" and "BBC One"
-    to one key everywhere else in probarr (the wantlist parser's own
-    duplicate detection, catalogue matching...), so this agrees with them
-    rather than doing its own, different thing. A genuinely different
-    channel -- a regional variant like "BBC One London" vs "BBC One North
-    West" -- keeps its own row, because regions aren't in the tags this
-    normaliser strips. Among duplicates, the shortest name wins as the
-    representative: the least qualified one, same reasoning the wantlist's
-    own fuzzy prefix match already uses.
+
+def _strip_region(name):
+    """`name` with a trailing quality tag and/or UK regional-variant word
+    removed, if present.
+
+    Real guides glue these onto the name with NO separator at all
+    ("BBC One ScotHD", "BBC One EastHD") as often as they space them out
+    ("BBC One CI HD") -- confirmed against a live source, not a
+    hypothetical. A plain word-boundary match refuses "ScotHD" outright
+    (there is no boundary between "Scot" and "HD", both are word
+    characters), so both tag lists are matched WITHOUT a leading boundary
+    requirement here, unlike Normalizer's own identity key -- the failure
+    mode of over-stripping is a slightly-off grouping default a person can
+    still correct via the picker, not a wrong stream landing on a channel,
+    so this can afford to be looser than the matching-identity code is.
+
+    Order matters in _REGION_WORDS -- longer, more specific phrases must be
+    tried before the short abbreviations they contain (e.g. "SOUTH EAST"
+    before "SE", so "BBC One South East" doesn't strip down to "BBC One
+    South" and land in the wrong family).
+    """
+    global _REGION_RE, _QUALITY_RE
+    if _REGION_RE is None:
+        import re
+        from .normalize import QUALITY_TAGS
+        # A boundary that accepts a camelCase transition ("east" -> "HD" in
+        # "EastHD") as well as a normal word boundary, but rejects matching
+        # partway through an ordinary word -- "One" must never let "NE"
+        # match its own trailing two letters just because they happen to
+        # spell a region code. Holds when the preceding character is
+        # anything but a letter (start-of-string, space, punctuation), OR
+        # when it's specifically a LOWERCASE letter (the camelCase case) --
+        # "One"'s trailing "ne" is preceded by an uppercase "O", so this
+        # correctly refuses it. The lowercase check is wrapped in `(?-i:)`
+        # to force case-sensitivity locally -- these patterns compile with
+        # IGNORECASE overall (so "hd" matches "HD"), and under IGNORECASE a
+        # bare [a-z] class ALSO matches uppercase, which silently turns
+        # this whole check into "preceded by any letter or not" -- true
+        # unconditionally, which is exactly what caused the "One" bug.
+        boundary = r"(?:(?<![A-Za-z])|(?-i:(?<=[a-z])))"
+        r_alt = "|".join(w.replace(" ", r"\s+") for w in
+                         sorted(_REGION_WORDS, key=len, reverse=True))
+        q_alt = "|".join(sorted(QUALITY_TAGS, key=len, reverse=True))
+        _REGION_RE = re.compile(rf"\s*{boundary}(?:{r_alt})\s*$", re.IGNORECASE)
+        _QUALITY_RE = re.compile(rf"\s*{boundary}(?:{q_alt})\s*$", re.IGNORECASE)
+    # Quality first ("ScotHD" -> "Scot"), then region on what's left
+    # ("Scot" -> ""), so a glued region+quality suffix strips fully either
+    # order they were applied in the source name.
+    stripped = _QUALITY_RE.sub("", name)
+    stripped = _REGION_RE.sub("", stripped)
+    return stripped.strip() or name
+
+
+def list_channels(root, source_name, normalizer=None):
+    """Every DISTINCT channel one saved EPG source declares, grouped by
+    real identity -- {guide_id, guide_name, alts} for each, sorted by
+    name. The bulk counterpart to search_source(): this exists so a
+    wantlist can be BUILT from a guide's own channel list (tick what you
+    want) instead of only checked against one, reusing a guide someone
+    else has already kept current rather than hand-typing a text file
+    from scratch.
+
+    Two kinds of "same channel, listed twice" are collapsed here, for two
+    different reasons:
+
+    1. Quality variants ("BBC One" / "BBC One HD") -- not two channels at
+       all, probarr already picks the best available quality among a
+       channel's candidates once streams are matched, so offering both as
+       separate tickable rows just means one gets ticked twice under two
+       different keys. Folded with the SAME normaliser that already treats
+       them as one key everywhere else in probarr, so this agrees with the
+       rest of the tool rather than doing its own, different thing.
+    2. Regional variants ("BBC One London" / "BBC One Scotland") -- these
+       ARE genuinely different broadcasts, not a bug to collapse away, but
+       a UK-wide guide can carry 15+ of them per channel and ticking
+       through all of them one at a time to find your own region is real
+       friction. These keep their real distinctness -- returned as ONE row
+       (a chosen representative) with every other region listed under
+       `alts`, so the picker can show a single line with a region dropdown
+       instead of a wall of near-identical rows. Nothing is discarded;
+       `alts` carries the rest through untouched.
     """
     src = epgsources_mod.get(root, source_name)
     if not src:
         raise ValueError(f"no such EPG source: {source_name}")
     g = load_cached(src["url"], root=root)
     norm = normalizer or Normalizer()
+
+    # Pass 1: fold quality variants (SD/HD/etc) to one row per key, exactly
+    # as before -- unrelated to regional grouping, done first so the
+    # region pass below only ever sees one representative per real feed.
     by_key = {}
     for cid, names in g.display_names.items():
         if not names:
@@ -173,7 +252,22 @@ def list_channels(root, source_name, normalizer=None):
         existing = by_key.get(key)
         if existing is None or len(name) < len(existing["guide_name"]):
             by_key[key] = {"guide_id": cid, "guide_name": name}
-    out = list(by_key.values())
+
+    # Pass 2: group what's left by "name with any trailing region word
+    # removed". A family of one is just that channel; a family of more
+    # than one is a genuine set of regional variants of the same channel.
+    families = {}
+    for entry in by_key.values():
+        fam_key = norm.key(_strip_region(entry["guide_name"])) or entry["guide_name"]
+        families.setdefault(fam_key, []).append(entry)
+
+    out = []
+    for members in families.values():
+        members.sort(key=lambda c: len(c["guide_name"]))
+        rep, rest = members[0], members[1:]
+        if rest:
+            rep = {**rep, "alts": rest}
+        out.append(rep)
     out.sort(key=lambda c: c["guide_name"].lower())
     return out
 
