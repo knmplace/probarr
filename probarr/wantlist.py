@@ -473,6 +473,51 @@ def reference_lineup_map(data, normalizer):
     return out
 
 
+def channels_from_reference(data, normalizer):
+    """Build a wantlist straight from a reference lineup's own channel list.
+
+    Enrichment (reference_lineup_map + enrich_with_reference) assumes you
+    already have a channel list from somewhere else -- an EPG, a hand-typed
+    file -- and are only filling in numbers/groups it's missing. But a
+    real broadcaster's EPG often names channels completely differently
+    from its own lineup (Sky's on-screen guide text is character-limited
+    and abbreviates: "SkySp F'ball HD" vs the lineup's "Sky Sports
+    Football"), so matching EPG names against the lineup can miss most of
+    it on naming alone.
+
+    Skipping the EPG step entirely and using the lineup's own names as the
+    channel list sidesteps that mismatch -- every name/number/group is
+    already exactly what the lineup says, and probarr's own stream
+    matching (which already tolerates real-world provider naming
+    variance via Normalizer, unlike a rigid EPG-name-to-lineup-name
+    lookup) is what finds the actual streams later, the same as any
+    other hand-built wantlist.
+    """
+    categories = data.get("categories") if isinstance(data, dict) else None
+    if not isinstance(categories, dict):
+        raise ValueError("not a recognised lineup format (expected a "
+                          "'categories' object)")
+    out, seen = [], set()
+    for category, entries in categories.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            number = entry.get("number")
+            if not name:
+                continue
+            key = normalizer.key(str(name))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(WantedChannel(
+                int(number) if isinstance(number, (int, float)) else None,
+                str(name), "", key, category or None))
+    return out
+
+
 def enrich_with_reference(channels, reference_map):
     """Fill in missing channel numbers/groups from a reference lineup map.
 

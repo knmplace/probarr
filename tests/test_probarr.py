@@ -181,6 +181,36 @@ class TestWantlist(unittest.TestCase):
         self.assertEqual([c.group for c in grouped],
                          ["Entertainment", "News", None, None])
 
+    def test_channels_from_reference_builds_a_full_wantlist(self):
+        norm = Normalizer()
+        data = {"categories": {"News": [{"name": "BBC News", "number": 503},
+                                         {"name": "CNBC", "number": 505}],
+                                "Sport": [{"name": "Sky Sports F1", "number": 407}]}}
+        chans = wl.channels_from_reference(data, norm)
+        self.assertEqual(len(chans), 3)
+        by_name = {c.name: c for c in chans}
+        self.assertEqual(by_name["BBC News"].number, 503)
+        self.assertEqual(by_name["BBC News"].group, "News")
+        self.assertEqual(by_name["Sky Sports F1"].group, "Sport")
+        rendered = wl.render(wl.group_together(chans))
+        self.assertIn("[News]", rendered)
+        self.assertIn("503: BBC News", rendered)
+
+    def test_channels_from_reference_drops_duplicate_names_across_categories(self):
+        # A name appearing in two categories (real data does this) must not
+        # produce two lines for the same channel -- first one wins, same
+        # rule as reference_lineup_map.
+        norm = Normalizer()
+        data = {"categories": {"A": [{"name": "Foo", "number": 1}],
+                                "B": [{"name": "Foo", "number": 2}]}}
+        chans = wl.channels_from_reference(data, norm)
+        self.assertEqual(len(chans), 1)
+        self.assertEqual(chans[0].number, 1)
+
+    def test_channels_from_reference_rejects_unrecognised_shape(self):
+        with self.assertRaises(ValueError):
+            wl.channels_from_reference({"channels": []}, Normalizer())
+
     def test_reference_lineup_map_flattens_categories(self):
         data = {"categories": {"News": [{"name": "BBC News", "number": 231}],
                                 "Sport": [{"name": "Sky Sports F1", "number": 401}]}}

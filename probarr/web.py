@@ -384,13 +384,9 @@ class Handler(BaseHTTPRequestHandler):
             if not url:
                 return self._send(json.dumps({"error": "reference URL required"}),
                                   "application/json", 400)
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "probarr/0.1"})
-                raw = urllib.request.urlopen(req, timeout=30).read()
-                data = json.loads(raw)
-            except Exception as e:
-                return self._send(json.dumps({"error": f"could not fetch/parse reference: {e}"[:300]}),
-                                  "application/json", 400)
+            data, err = self._fetch_reference_json(url)
+            if err:
+                return self._send(json.dumps({"error": err}), "application/json", 400)
             norm = self._norm()
             try:
                 ref_map = wl.reference_lineup_map(data, norm)
@@ -413,6 +409,34 @@ class Handler(BaseHTTPRequestHandler):
                 # no match in the reference lineup.
                 "warnings": [w["problem"] for w in warnings][:50],
                 "unmatched": still_unmatched[:80],
+            }), "application/json")
+
+        if path == "/api/wantlists/from-reference":
+            # Builds a wantlist directly from a reference lineup's own
+            # name/number/group data, instead of matching it against
+            # names an EPG happens to use -- see channels_from_reference()
+            # for why that EPG-name matching step is often the weak link,
+            # not the reference data itself.
+            body, sent = self._json_body()
+            if sent:
+                return
+            url = (body.get("url") or "").strip()
+            if not url:
+                return self._send(json.dumps({"error": "reference URL required"}),
+                                  "application/json", 400)
+            data, err = self._fetch_reference_json(url)
+            if err:
+                return self._send(json.dumps({"error": err}), "application/json", 400)
+            norm = self._norm()
+            try:
+                channels = wl.channels_from_reference(data, norm)
+            except ValueError as e:
+                return self._send(json.dumps({"error": str(e)[:300]}),
+                                  "application/json", 400)
+            channels = wl.group_together(channels)
+            return self._send(json.dumps({
+                "text": wl.render(channels),
+                "count": len(channels),
             }), "application/json")
 
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "run" \
@@ -812,6 +836,15 @@ class Handler(BaseHTTPRequestHandler):
         halves of the tool would disagree about what a channel is called.
         """
         return Normalizer(aliases=aliases_mod.read(self.root))
+
+    def _fetch_reference_json(self, url):
+        """GET a reference-lineup URL and parse it as JSON. Returns (data, error)."""
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "probarr/0.1"})
+            raw = urllib.request.urlopen(req, timeout=30).read()
+            return json.loads(raw), None
+        except Exception as e:
+            return None, f"could not fetch/parse reference: {e}"[:300]
 
     # A full provider catalogue (55k+ entries is normal) costs real seconds
     # to download and parse, and every deploy recreates this container --

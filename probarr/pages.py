@@ -115,9 +115,7 @@ __TOPBAR__
       <div class="sub">Known lineups are pulled from the
         <a href="https://github.com/PiratesIRC/Dispatcharr-Lineuparr-Plugin/tree/main/Lineuparr"
            target="_blank" rel="noopener">Lineuparr project</a> &mdash; fetched fresh each time,
-        nothing stored here. Matches by name against the channels already in the editor below;
-        only fills a number or group that's currently blank &mdash; anything you've already set
-        (here or in a prior curated run) is left alone.</div>
+        nothing stored here.</div>
       <div class="row" style="margin:10px 0">
         <select id="enrich-select" style="flex:1"></select>
         <button id="enrich-refresh" title="Re-fetch the list from GitHub">Refresh list</button>
@@ -127,9 +125,27 @@ __TOPBAR__
           placeholder="https://raw.githubusercontent.com/.../lineup.json">
       </div>
       <div class="mresult" id="enrich-result"></div>
-      <div class="mrow">
+      <div class="mrow" style="flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between">
+        <div style="flex:1;min-width:220px">
+          <b>Apply to editor</b> &mdash; matches by name against the channels
+          already in the editor below; only fills a number or group that's
+          currently blank, everything else is left alone.
+        </div>
+        <button id="enrich-go">Apply to editor</button>
+      </div>
+      <div class="mrow" style="flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between;margin-top:10px">
+        <div style="flex:1;min-width:220px">
+          <b>Load channels from this lineup</b> &mdash; skips any EPG entirely
+          and builds the list straight from the lineup's own names, numbers
+          and groups. Best when your EPG's names don't textually resemble
+          the lineup's (e.g. Sky's abbreviated on-screen guide text) &mdash;
+          probarr's own stream matching handles the real-world naming
+          variance from here. <b>Replaces</b> whatever's in the editor.
+        </div>
+        <button class="primary" id="enrich-load">Load channels</button>
+      </div>
+      <div class="mrow" style="margin-top:14px">
         <button id="enrich-close">Close</button>
-        <button class="primary" id="enrich-go">Apply to editor</button>
       </div>
     </div>
   </div>
@@ -442,6 +458,27 @@ $("enrich-go").addEventListener("click", async () => {
     }
   }catch(e){ $("enrich-result").innerHTML = '<div class="warn">Request failed.</div>'; }
   $("enrich-go").disabled = false; $("enrich-go").textContent = "Apply to editor";
+});
+$("enrich-load").addEventListener("click", async () => {
+  const sel = $("enrich-select").value;
+  const url = sel === "__custom__" ? $("enrich-url").value.trim() : sel;
+  if(!url){ $("enrich-result").innerHTML = '<div class="warn">Choose a lineup, or pick "Custom URL…" and paste one.</div>'; return; }
+  if($("text").value.trim() && !confirm("This replaces everything currently in the editor with this lineup's own channel list. Continue?")) return;
+  $("enrich-load").disabled = true; $("enrich-load").textContent = "fetching…";
+  try{
+    const r = await fetch("/api/wantlists/from-reference", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({url})});
+    const d = await r.json();
+    if(!r.ok || d.error){
+      $("enrich-result").innerHTML = '<div class="warn">'+esc(d.error||"failed")+'</div>';
+    } else {
+      $("text").value = d.text;
+      preview();
+      $("enrich-result").innerHTML = '<div class="ok">Loaded '+d.count+
+        ' channels straight from the lineup &mdash; editor replaced.</div>';
+    }
+  }catch(e){ $("enrich-result").innerHTML = '<div class="warn">Request failed.</div>'; }
+  $("enrich-load").disabled = false; $("enrich-load").textContent = "Load channels";
 });
 
 $("save").addEventListener("click", async ()=>{
