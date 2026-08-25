@@ -270,6 +270,28 @@ class TestStore(Temp):
         self.assertEqual(s.read_removals(), [])
 
 
+class TestEpgList(Temp):
+    def test_collapses_sd_hd_pairs_but_keeps_real_regional_variants(self):
+        from probarr import epgcheck, epgsources
+        xml = os.path.join(self.root, "guide.xml")
+        with open(xml, "w", encoding="utf-8") as f:
+            f.write("""<?xml version="1.0"?><tv>
+                <channel id="1"><display-name>BBC One</display-name></channel>
+                <channel id="2"><display-name>BBC One HD</display-name></channel>
+                <channel id="3"><display-name>BBC One London</display-name></channel>
+                <channel id="4"><display-name>BBC One North West</display-name></channel>
+            </tv>""")
+        epgsources.save(self.root, "test-guide", "file://" + xml)
+        out = epgcheck.list_channels(self.root, "test-guide", Normalizer())
+        names = sorted(c["guide_name"] for c in out)
+        # "BBC One" and "BBC One HD" are the same channel -- one row, the
+        # plain (shorter, less qualified) name wins as the representative.
+        # "BBC One London" and "BBC One North West" are genuinely different
+        # regional feeds -- neither the wantlist parser nor this collapses
+        # those, so both keep their own row.
+        self.assertEqual(names, ["BBC One", "BBC One London", "BBC One North West"])
+
+
 class TestBackup(Temp):
     def test_round_trips_config_and_run_state(self):
         from probarr import backup as backup_mod

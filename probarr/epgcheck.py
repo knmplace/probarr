@@ -20,6 +20,7 @@ import time
 import urllib.request
 
 from .epg import Guide
+from .normalize import Normalizer
 from . import epgsources as epgsources_mod
 
 # XMLTV files are typically refreshed by their publisher on the order of
@@ -132,6 +133,49 @@ def search_source(root, source_name, query, normalizer, limit=25):
     at = datetime.datetime.now(datetime.timezone.utc)
     return [{"guide_id": cid, "guide_name": name, "now": g.now_playing(cid, at)}
             for cid, name in g.search(query, limit=limit)]
+
+
+def list_channels(root, source_name, normalizer=None):
+    """Every DISTINCT channel one saved EPG source declares -- {guide_id,
+    guide_name} for each, sorted by name. The bulk counterpart to
+    search_source(): this exists so a wantlist can be BUILT from a guide's
+    own channel list (tick what you want) instead of only checked against
+    one, reusing a guide someone else has already kept current rather than
+    hand-typing a text file from scratch.
+
+    "Distinct" is doing real work here: a guide commonly lists the same
+    channel twice under different SIDs for SD and HD ("BBC One" and "BBC
+    One HD"), which are not two channels to a wantlist -- probarr already
+    picks the best available quality among a channel's candidates once
+    streams are matched, so offering both as separate tickable rows just
+    means one gets picked twice under two different keys. Collapsed here
+    with the SAME normaliser that already folds "BBC One HD" and "BBC One"
+    to one key everywhere else in probarr (the wantlist parser's own
+    duplicate detection, catalogue matching...), so this agrees with them
+    rather than doing its own, different thing. A genuinely different
+    channel -- a regional variant like "BBC One London" vs "BBC One North
+    West" -- keeps its own row, because regions aren't in the tags this
+    normaliser strips. Among duplicates, the shortest name wins as the
+    representative: the least qualified one, same reasoning the wantlist's
+    own fuzzy prefix match already uses.
+    """
+    src = epgsources_mod.get(root, source_name)
+    if not src:
+        raise ValueError(f"no such EPG source: {source_name}")
+    g = load_cached(src["url"], root=root)
+    norm = normalizer or Normalizer()
+    by_key = {}
+    for cid, names in g.display_names.items():
+        if not names:
+            continue
+        name = names[0]
+        key = norm.key(name) or name
+        existing = by_key.get(key)
+        if existing is None or len(name) < len(existing["guide_name"]):
+            by_key[key] = {"guide_id": cid, "guide_name": name}
+    out = list(by_key.values())
+    out.sort(key=lambda c: c["guide_name"].lower())
+    return out
 
 
 def check_all(root, name, tvg_id, normalizer, overrides=None):

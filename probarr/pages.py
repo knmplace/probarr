@@ -36,6 +36,28 @@ input[type=text]{background:var(--bg);color:var(--text);border:1px solid var(--l
   overflow-x:auto;white-space:pre;margin-top:8px}
 .cmd b{color:var(--accent)}
 .muted{color:var(--faint);font-size:12px}
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:150;
+  align-items:center;justify-content:center}
+.modal.on{display:flex}
+.modalbox{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  width:460px;max-width:92vw;max-height:88vh;overflow-y:auto;padding:18px 20px;position:relative}
+.modalbox h3{margin:0 0 4px;font-size:16px}
+.modalx{position:absolute;top:12px;right:14px;background:none;border:0;
+  color:var(--faint);font-size:15px;cursor:pointer;padding:2px 4px}
+.modalx:hover{color:var(--text)}
+.modalbox .sub{color:var(--dim);font-size:12px;margin-bottom:14px}
+.mfield select{width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);
+  border-radius:var(--radius);padding:7px 9px;font-size:13px}
+.mrow{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.mresult{margin-top:14px;padding:10px 12px;border-radius:var(--radius);font-size:12.5px;
+  display:none}
+.mresult.show{display:block}
+.mresult.good{background:rgba(39,194,76,.1);border:1px solid var(--ok)}
+.mresult.bad{background:rgba(240,80,80,.1);border:1px solid var(--bad)}
+.cat-results{max-height:300px;overflow:auto;display:flex;flex-direction:column;gap:4px}
+.cat-hit{display:flex;gap:9px;align-items:center;padding:6px 8px;background:var(--bg2);
+  border:1px solid var(--line);border-radius:var(--radius);cursor:pointer}
+.cat-hit .k{font-weight:600;flex:1}
 """
 
 WANTLIST_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -72,6 +94,47 @@ __TOPBAR__
     <div class="row" style="margin-top:8px">
       <a href="/browse"><button>Browse a provider's channels instead</button></a>
       <span class="muted">no typing, no probing &mdash; tick names from what your provider actually lists</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="epgimportopen">Import channels from an EPG source&hellip;</button>
+      <span class="muted">tick names from a guide someone else already keeps current, adds to
+        whatever's in the editor rather than replacing it</span>
+    </div>
+  </div>
+
+  <div class="modal" id="epgimportmodal">
+    <div class="modalbox" style="width:min(640px,94vw)">
+      <button class="modalx" id="epgimp-x" title="Close">&#10005;</button>
+      <h3>Import channels from an EPG source</h3>
+      <div class="sub">Every DISTINCT channel one of your saved EPG sources
+        declares &mdash; an SD/HD pair like "BBC One" / "BBC One HD" is
+        folded into one row (the plain name), the same way probarr already
+        treats them as one channel everywhere else; a real regional variant
+        like "BBC One London" keeps its own row. Tick what you want &mdash;
+        ticked channels are appended to the editor as
+        <code>name | tvg-id</code> lines, keeping whatever's already there.
+        XMLTV carries no group/category data, so there's no per-group tick
+        here &mdash; just search and select/deselect all.</div>
+      <div class="mfield" style="margin-bottom:8px">
+        <select id="epgimp-src" style="width:100%"></select>
+      </div>
+      <div class="row" style="margin-bottom:8px">
+        <input type="text" id="epgimp-newname" placeholder="new source name" style="width:140px">
+        <input type="text" id="epgimp-newurl" placeholder="XMLTV URL (.xml or .xml.gz)" style="flex:1">
+        <button id="epgimp-newsave">Add source</button>
+      </div>
+      <div class="row" style="margin-bottom:8px">
+        <input type="text" id="epgimp-q" placeholder="Filter&hellip;" style="flex:1">
+        <button class="togg" id="epgimp-all">select all</button>
+        <button class="togg" id="epgimp-none">select none</button>
+        <span class="muted" id="epgimp-count"></span>
+      </div>
+      <div id="epgimp-list" class="cat-results" style="max-height:360px"></div>
+      <div class="mresult" id="epgimp-result"></div>
+      <div class="mrow">
+        <button id="epgimp-close">Close</button>
+        <button class="primary" id="epgimp-add" disabled>Add ticked to editor</button>
+      </div>
     </div>
   </div>
 
@@ -162,6 +225,99 @@ $("starterselect").addEventListener("change", async ()=>{
   $("starterselect").value = "";
   preview();
 });
+
+// --- Import channels from an EPG source ---------------------------------
+// The bulk counterpart to Check EPG's search: instead of checking one
+// channel against a guide, build a whole wantlist FROM one -- reusing a
+// guide someone else already keeps current instead of hand-typing a list.
+let EPGIMP_CHANNELS = [];
+async function openEpgImport(){
+  const d = await (await fetch("/api/epg-sources")).json();
+  const sel = $("epgimp-src");
+  sel.innerHTML = (d.epg_sources||[]).map(s =>
+    '<option value="'+esc(s.name)+'">'+esc(s.name)+'</option>').join("") ||
+    '<option value="">No EPG sources saved yet</option>';
+  $("epgimportmodal").classList.add("on");
+  if(d.epg_sources && d.epg_sources.length) loadEpgImportList();
+}
+async function loadEpgImportList(){
+  const src = $("epgimp-src").value;
+  const box = $("epgimp-list");
+  box.innerHTML = '<div class="muted" style="padding:6px">loading&hellip;</div>';
+  $("epgimp-add").disabled = true;
+  if(!src) { box.innerHTML = ""; return; }
+  try{
+    const r = await fetch("/api/epg-list?source="+encodeURIComponent(src));
+    const d = await r.json();
+    if(d.error){ box.innerHTML = '<div class="muted" style="padding:6px">'+esc(d.error)+'</div>'; return; }
+    EPGIMP_CHANNELS = d.channels || [];
+  }catch(e){
+    box.innerHTML = '<div class="muted" style="padding:6px">request failed</div>';
+    return;
+  }
+  renderEpgImportList();
+}
+function renderEpgImportList(){
+  const q = $("epgimp-q").value.trim().toLowerCase();
+  const box = $("epgimp-list");
+  const rows = EPGIMP_CHANNELS.filter(c => !q || c.guide_name.toLowerCase().includes(q));
+  box.innerHTML = rows.map(c =>
+    '<label class="cat-hit"><input type="checkbox" class="epgimp-pick" '+
+    'data-name="'+esc(c.guide_name)+'" data-id="'+esc(c.guide_id)+'">'+
+    '<span class="k">'+esc(c.guide_name)+'</span></label>').join("") ||
+    '<div class="muted" style="padding:6px">no channels match</div>';
+  updateEpgImportCount();
+}
+function updateEpgImportCount(){
+  const n = document.querySelectorAll(".epgimp-pick:checked").length;
+  $("epgimp-count").textContent = n ? n+" ticked" : "";
+  $("epgimp-add").disabled = !n;
+}
+$("epgimp-newsave").addEventListener("click", async () => {
+  const name = $("epgimp-newname").value.trim(), url = $("epgimp-newurl").value.trim();
+  if(!name || !url) return;
+  $("epgimp-newsave").disabled = true; $("epgimp-newsave").textContent = "saving…";
+  try{
+    const r = await fetch("/api/epg-sources/"+encodeURIComponent(name), {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({url})});
+    const d = await r.json();
+    if(!r.ok || d.error){
+      alert("Could not save: "+(d.error||"failed"));
+    } else {
+      $("epgimp-newname").value = ""; $("epgimp-newurl").value = "";
+      await openEpgImport();          // refresh the source list
+      $("epgimp-src").value = name;   // land on the one just added
+      loadEpgImportList();
+    }
+  }catch(e){ alert("Request failed."); }
+  $("epgimp-newsave").disabled = false; $("epgimp-newsave").textContent = "Add source";
+});
+$("epgimportopen").addEventListener("click", openEpgImport);
+$("epgimp-x").addEventListener("click", () => $("epgimportmodal").classList.remove("on"));
+$("epgimp-close").addEventListener("click", () => $("epgimportmodal").classList.remove("on"));
+$("epgimp-src").addEventListener("change", loadEpgImportList);
+$("epgimp-q").addEventListener("input", renderEpgImportList);
+$("epgimp-list").addEventListener("change", e => {
+  if(e.target.classList.contains("epgimp-pick")) updateEpgImportCount();
+});
+$("epgimp-all").addEventListener("click", () => {
+  document.querySelectorAll(".epgimp-pick").forEach(x => x.checked = true);
+  updateEpgImportCount();
+});
+$("epgimp-none").addEventListener("click", () => {
+  document.querySelectorAll(".epgimp-pick").forEach(x => x.checked = false);
+  updateEpgImportCount();
+});
+$("epgimp-add").addEventListener("click", () => {
+  const picked = [...document.querySelectorAll(".epgimp-pick:checked")]
+    .map(x => x.dataset.name+" | "+x.dataset.id);
+  if(!picked.length) return;
+  const cur = $("text").value;
+  $("text").value = (cur && !cur.endsWith("\n") ? cur+"\n" : cur) + picked.join("\n") + "\n";
+  preview();
+  $("epgimportmodal").classList.remove("on");
+});
+
 $("save").addEventListener("click", async ()=>{
   const name=$("name").value.trim();
   if(!name){ $("savemsg").textContent="Give it a name first."; return; }

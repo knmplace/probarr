@@ -186,6 +186,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(pages.wantlist_page())
         if path == "/wantlists/template.txt":
             return self._send(wl.TEMPLATE, "text/plain; charset=utf-8")
+        if path == "/api/epg-list":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            src = qs.get("source", [""])[0]
+            try:
+                channels = epgcheck_mod.list_channels(self.root, src, self._norm())
+            except Exception as e:
+                return self._send(json.dumps({"error": str(e)[:200]}), "application/json", 404)
+            return self._send(json.dumps({"channels": channels}), "application/json")
         if path == "/api/wantlists/starters":
             return self._send(json.dumps({"starters": wl.list_starters()}),
                               "application/json")
