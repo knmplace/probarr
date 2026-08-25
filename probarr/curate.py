@@ -86,6 +86,18 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
 .cand.unused:hover{opacity:.85}
 .cand.dragging{opacity:.4}
 .cand.dropinto{border-color:var(--accent2);box-shadow:0 -2px 0 var(--accent2) inset}
+/* Diagnose/Find-streams progress: which candidate is being scanned right
+   now, and a brief flash on whichever one just landed a fresh result --
+   so a multi-candidate scan reads as a live, moving process rather than a
+   silent wait that only resolves at the very end. */
+.cand.probing{border-color:var(--accent2);
+  box-shadow:0 0 0 2px var(--accent2) inset,0 0 10px 0 var(--accent2);
+  animation:cand-probing-pulse 1.3s ease-in-out infinite}
+@keyframes cand-probing-pulse{
+  0%,100%{box-shadow:0 0 0 2px var(--accent2) inset,0 0 4px 0 var(--accent2)}
+  50%{box-shadow:0 0 0 2px var(--accent2) inset,0 0 14px 2px var(--accent2)}}
+.cand.just-scanned{animation:cand-just-scanned 1.5s ease-out}
+@keyframes cand-just-scanned{0%{background:var(--accent2)}100%{background:var(--panel)}}
 .cand .grip{width:26px;flex:none;display:flex;align-items:center;justify-content:center;
   color:var(--faint);cursor:grab;font-size:13px;user-select:none;background:var(--bg2)}
 .cand.unused .grip{cursor:default;color:transparent}
@@ -2418,18 +2430,42 @@ async function diagnoseChannel(){
     let snap;
     try{ snap = await (await fetch("/api/queue", {cache:"no-store"})).json(); }
     catch(e){ setMsg("lost track of progress"); setBtnDisabled(false); return; }
-    let landed = false;
+    const landedKeys = [];
     for(const k of [...pending]) if(!(snap.keys && snap.keys[k])){
-      pending.delete(k); landed = true;
+      pending.delete(k); landedKeys.push(k.slice((DATA.run_id+"|").length));
     }
+    // Pull each candidate's fresh picture and status in AS IT LANDS, not
+    // only once every candidate is done. The old code only ever called
+    // refreshChannel() after the whole batch finished, so a five-minute
+    // scan of nine candidates showed nothing changing on screen until the
+    // very end -- indistinguishable from having frozen. This must happen
+    // BEFORE the button/highlight pass below, since it rebuilds the whole
+    // detail panel (renderDetail()) and would otherwise wipe out whatever
+    // that pass had just set.
+    if(landedKeys.length && current === key) await refreshChannel(current);
+    if(current !== key) return;   // operator switched channels mid-scan
+    document.querySelectorAll(".cand.probing").forEach(r=>r.classList.remove("probing"));
     queued.forEach(q => {
       const st = snap.keys && snap.keys[DATA.run_id+"|"+q.rec_key];
-      const b = document.querySelector('.cand[data-id="'+CSS.escape(q.rec_key)+
-                                       '"] button[data-act="reprobe"]');
-      if(!b) return;
-      if(st) b.textContent = st.state === "running" ? "\u2026"
-                                                    : "#"+(st.position||"?");
-      else { b.textContent = "\u21bb"; b.disabled = false; }
+      const row = document.querySelector('.cand[data-id="'+CSS.escape(q.rec_key)+'"]');
+      const b = row && row.querySelector('button[data-act="reprobe"]');
+      if(st){
+        if(b) b.textContent = st.state === "running" ? "\u2026"
+                                                      : "#"+(st.position||"?");
+        // The highlight IS the answer to "which one am I watching" -- a
+        // counter or a per-row "queued #3" label doesn't say which
+        // candidate has the provider's one connection right now, and that
+        // is exactly what you want to see moving during a multi-candidate
+        // scan.
+        if(row && st.state === "running") row.classList.add("probing");
+      } else if(b) { b.textContent = "\u21bb"; b.disabled = false; }
+    });
+    landedKeys.forEach(recKey => {
+      const row = document.querySelector('.cand[data-id="'+CSS.escape(recKey)+'"]');
+      if(row){
+        row.classList.add("just-scanned");
+        setTimeout(()=>row.classList.remove("just-scanned"), 1500);
+      }
     });
     if(snap.blocked && pending.size){
       setMsg(snap.blocked);
@@ -2444,7 +2480,6 @@ async function diagnoseChannel(){
     }
     setMsg("done \u2014 "+queued.length+" scanned");
     setBtnDisabled(false);
-    await refreshChannel(current);
     setTimeout(()=>{ const m = msg(); if(m && m.textContent.startsWith("done")) m.textContent=""; }, 5000);
   };
   setTimeout(tick, 800);
