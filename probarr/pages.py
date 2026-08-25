@@ -958,6 +958,10 @@ $("toggle").addEventListener("click", ()=>{
   $("spec").type = on ? "text" : "password";
   $("toggle").textContent = on ? "Hide" : "Show";
 });
+$("spec").addEventListener("input", ()=>{
+  $("spec").style.borderColor = "";
+  $("testresult").className = "testresult";
+});
 
 $("test").addEventListener("click", async ()=>{
   const spec = $("spec").value.trim();
@@ -981,7 +985,23 @@ $("test").addEventListener("click", async ()=>{
 $("save").addEventListener("click", async ()=>{
   const name=$("name").value.trim(), spec=$("spec").value.trim();
   const concurrency = $("concurrency").value.trim();
-  if(!name || !spec){ $("savemsg").textContent="Name and address are both required."; return; }
+  if(!name || !spec){
+    // The address field is left EMPTY after clicking Edit (the real value
+    // is never sent to the browser), but its placeholder -- "re-enter the
+    // address for X" -- reads enough like real filled-in content that it's
+    // easy to click Save without noticing nothing was typed. A quiet grey
+    // message next to the button was easy to miss entirely, which read as
+    // "editing a provider doesn't work" rather than "the field is empty".
+    // Highlighting the field itself, not just the message, makes it obvious.
+    $("spec").style.borderColor = "var(--bad)";
+    $("spec").focus();
+    $("testresult").className = "testresult show bad";
+    $("testresult").textContent = !name ? "Name is required."
+      : "Paste the address again \u2014 it's cleared after Edit since it's "
+        + "never sent to the browser, and wasn't re-entered.";
+    return;
+  }
+  $("spec").style.borderColor = "";
   $("savemsg").textContent="saving\u2026";
   const r = await fetch("/api/providers/"+encodeURIComponent(name), {method:"POST",
     headers:{"Content-Type":"application/json"},
@@ -1019,8 +1039,13 @@ document.addEventListener("click", async e=>{
     // re-entering it. Saving under the same name replaces the old one.
     if(p){ $("name").value=p.name; $("spec").value="";
            $("spec").placeholder = "re-enter the address for " + p.name;
+           $("spec").style.borderColor = "var(--bad)";
            $("concurrency").value = p.concurrency || "";
-           window.scrollTo({top:0,behavior:"smooth"}); }
+           $("testresult").className = "testresult show bad";
+           $("testresult").textContent = "Address cleared for editing — it's never sent "
+             + "to the browser, so paste it again below before saving.";
+           window.scrollTo({top:0,behavior:"smooth"});
+           $("spec").focus(); }
   }
   if(dl){
     if(!confirm("Delete provider \""+dl.dataset.del+"\"?")) return;
