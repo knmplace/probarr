@@ -356,13 +356,22 @@ def group_together(channels):
     by group here, stably and keyed on each group's first appearance (not
     alphabetically -- that would reshuffle a deliberate ordering someone
     already had), turns it back into one block per group.
+
+    The ungrouped bucket (group is None/"") is always pushed to the end
+    regardless of where it first appeared. It's typically the leftovers a
+    reference lineup had no entry for, and after a broad EPG import that
+    bucket can dwarf every real group combined -- left in its natural file
+    position it can bury every properly-grouped, fully-numbered category
+    underneath a long wall of blanks, which reads as if enrichment had
+    simply stopped working partway through rather than run to completion.
     """
     order, seen = [], set()
     for c in channels:
-        if c.group not in seen:
+        if c.group and c.group not in seen:
             seen.add(c.group)
             order.append(c.group)
     rank = {g: i for i, g in enumerate(order)}
+    rank[None] = rank[""] = len(order)
     return sorted(channels, key=lambda c: rank[c.group])
 
 

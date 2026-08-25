@@ -400,10 +400,19 @@ class Handler(BaseHTTPRequestHandler):
             channels, warnings = wl.parse_detailed(text, norm)
             channels, matched = wl.enrich_with_reference(channels, ref_map)
             channels = wl.group_together(channels)
+            still_unmatched = [c.name for c in channels if c.number is None]
             return self._send(json.dumps({
                 "text": wl.render(channels),
                 "matched": matched,
                 "total": len(channels),
+                # parse_detailed silently drops a line whose name normalises
+                # to a key already seen earlier in the file (see its own
+                # duplicate-of-line-N warning) -- surfaced here rather than
+                # left invisible, since a channel that vanished entirely
+                # looks identical, from the editor, to one that simply had
+                # no match in the reference lineup.
+                "warnings": [w["problem"] for w in warnings][:50],
+                "unmatched": still_unmatched[:80],
             }), "application/json")
 
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "run" \

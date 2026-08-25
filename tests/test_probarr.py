@@ -166,6 +166,21 @@ class TestWantlist(unittest.TestCase):
         grouped = wl.group_together(chans)
         self.assertEqual([c.name for c in grouped], ["BBC News", "Sky News", "ITV News"])
 
+    def test_group_together_pushes_the_ungrouped_bucket_to_the_end(self):
+        # A wide EPG import against a narrow reference lineup leaves most
+        # channels with no group at all -- if that bucket happens to appear
+        # early in the file, it must not bury groups discovered later in
+        # a wall of blanks (this is exactly what real reference-lineup
+        # enrichment looked like: Entertainment matched, then a huge
+        # unmatched run, with News/Sports/etc still fully numbered further
+        # down -- easy to mistake for enrichment having stopped working).
+        norm = Normalizer()
+        text = "[Entertainment]\n4seven\n[]\nUnmatched One\nUnmatched Two\n[News]\nBBC News\n"
+        chans, _ = wl.parse_detailed(text, norm)
+        grouped = wl.group_together(chans)
+        self.assertEqual([c.group for c in grouped],
+                         ["Entertainment", "News", None, None])
+
     def test_reference_lineup_map_flattens_categories(self):
         data = {"categories": {"News": [{"name": "BBC News", "number": 231}],
                                 "Sport": [{"name": "Sky Sports F1", "number": 401}]}}

@@ -429,8 +429,16 @@ $("enrich-go").addEventListener("click", async () => {
     } else {
       $("text").value = d.text;
       preview();
-      $("enrich-result").innerHTML = '<div class="ok">Matched '+d.matched+' of '+d.total+
+      let html = '<div class="ok">Matched '+d.matched+' of '+d.total+
         ' channels &mdash; editor updated.</div>';
+      if((d.warnings||[]).length)
+        html += '<div class="warn">'+d.warnings.length+' line(s) had a problem before '+
+          'matching even ran:<br>'+d.warnings.map(esc).join('<br>')+'</div>';
+      if((d.unmatched||[]).length)
+        html += '<div class="muted" style="margin-top:6px">No match in this lineup for: '+
+          d.unmatched.map(esc).join(', ')+
+          (d.unmatched.length>=80 ? ' &hellip;' : '')+'</div>';
+      $("enrich-result").innerHTML = html;
     }
   }catch(e){ $("enrich-result").innerHTML = '<div class="warn">Request failed.</div>'; }
   $("enrich-go").disabled = false; $("enrich-go").textContent = "Apply to editor";
