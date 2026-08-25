@@ -403,7 +403,28 @@ def capture(url: str, opts: ProbeOptions, thumb_path: str,
         # every other output here (rawvideo, single-frame image2, mpegts)
         # already tolerates truncation for the same reason; this is what
         # makes MP4 do the same.
-        cmd += ["-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+        #
+        # Audio is TRANSCODED to AAC rather than stream-copied, and that is
+        # load-bearing, not tidiness. Fragmented MP4 has to write its header
+        # up front (that is the whole point of empty_moov, above), but the
+        # MP4 muxer cannot describe an E-AC-3 track until it has parsed some
+        # of its packets -- so copying eac3 audio in here fails outright with
+        # "Cannot write moov atom before EAC3 packets parsed".
+        #
+        # ffmpeg then aborts the ENTIRE command, not just this output. Every
+        # other output in this single pass -- the thumbnail, the full frame,
+        # the crop, the hash frames, the bitrate remux -- is discarded with
+        # it, and the probe reports "no frame could be decoded" for a stream
+        # that was decoding perfectly. Found for real: an eac3 channel that
+        # played fine in a player and passed every Verify run (those capture
+        # no clip) failed EVERY Diagnose and re-probe, deterministically,
+        # because only those two set capture_clip.
+        #
+        # Video stays a stream copy, which is where the cost would be; AAC
+        # encoding a stereo track is negligible next to the decode already
+        # happening.
+        cmd += ["-map", "0:v:0", "-map", "0:a:0?",
+                "-c:v", "copy", "-c:a", "aac",
                 "-movflags", "frag_keyframe+empty_moov+default_base_moof",
                 "-f", "mp4", clip_path]
 
@@ -592,6 +613,32 @@ def probe(stream, opts: ProbeOptions, thumb_path: str,
 
     cap = capture(stream.url, opts, thumb_path, frame_path, crop_path, clip_path)
     attempts = 1
+
+    # The clip is an OPTIONAL extra, and it must never be able to cost us the
+    # thing the probe actually exists to produce. ffmpeg writes every output
+    # of this single pass in one process, so an output it cannot even open --
+    # a muxer rejecting the source's audio codec, say -- aborts the whole
+    # command and takes the thumbnail, frame, crop and bitrate down with it.
+    #
+    # The eac3-in-fragmented-MP4 case that motivated this is fixed properly
+    # at its source above, but the failure MODE is general: any future codec
+    # or container the clip muxer dislikes would silently do the same thing,
+    # and it would again look exactly like a dead channel. So if a capture
+    # that asked for a clip came back with no picture, immediately try once
+    # more WITHOUT the clip before concluding anything about the stream.
+    #
+    # Deliberately ahead of the retry_empty backoff below, and deliberately
+    # not counted as one of its attempts: this is not "the provider might be
+    # busy, wait and ask again", it is "our own command may have been
+    # unnecessarily fragile, ask again more simply". Retrying the identical
+    # broken command on a backoff is pure waste -- a deterministic muxer
+    # failure fails identically every time, which is exactly what was
+    # observed (four attempts over ~31s, all failing the same way).
+    if cap["thumb"] is None and opts.capture_clip and clip_path:
+        cap = capture(stream.url, opts, thumb_path, frame_path, crop_path, None)
+        attempts += 1
+        cap["clip_skipped"] = True
+
     if cap["thumb"] is None and opts.retry_empty:
         # A capture that produces no picture at all is very often a transient
         # connect failure rather than a broken stream -- seen for real against

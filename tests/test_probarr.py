@@ -796,6 +796,144 @@ class TestProviderDeclined(Temp):
         self.assertNotIn("provider_declined", result)
 
 
+class TestClipNeverCostsThePicture(Temp):
+    """The real cause of a channel that played fine everywhere but failed
+    every Diagnose and every re-probe.
+
+    ffmpeg writes all of capture()'s outputs in ONE process. The clip is an
+    optional extra, but an output it cannot even open aborts the entire
+    command -- so an MP4 muxer rejecting the source's audio took the
+    thumbnail, frame, crop and bitrate down with it, and the probe reported
+    "no frame could be decoded" for a perfectly healthy stream. Verify runs
+    were unaffected precisely because they capture no clip.
+    """
+
+    def test_clip_audio_is_transcoded_not_copied(self):
+        # Fragmented MP4 writes its header up front, and the muxer cannot
+        # describe an E-AC-3 track before parsing its packets -- so copying
+        # eac3 in here fails with "Cannot write moov atom before EAC3
+        # packets parsed" and kills every other output. Video must still be
+        # a copy; that is where the cost would be.
+        import unittest.mock
+        from probarr import probe as probe_mod
+
+        seen = []
+
+        def fake_run(cmd, timeout):
+            seen.append(cmd)
+            raise RuntimeError("stop here")
+
+        opts = probe_mod.ProbeOptions(capture_clip=True)
+        with unittest.mock.patch.object(probe_mod, "_run", fake_run):
+            try:
+                probe_mod.capture("http://x/1", opts, "/tmp/t.jpg",
+                                  "/tmp/f.jpg", "/tmp/c.jpg", "/tmp/clip.mp4")
+            except RuntimeError:
+                pass
+
+        cmd = seen[0]
+        self.assertIn("-c:a", cmd)
+        self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
+        self.assertIn("-c:v", cmd)
+        self.assertEqual(cmd[cmd.index("-c:v") + 1], "copy")
+        # The bare "-c copy" that used to cover BOTH tracks is what broke it.
+        for i, tok in enumerate(cmd):
+            if tok == "-c" and i + 1 < len(cmd) and cmd[i + 1] == "copy":
+                # Only legitimate remaining use is the video-only bitrate remux.
+                self.assertIn("mpegts", cmd[i:i + 6])
+
+    def test_a_failed_clip_is_retried_without_the_clip(self):
+        # General protection, independent of any one codec: if asking for a
+        # clip produced no picture, try again without it before concluding
+        # anything about the stream.
+        import unittest.mock
+        from probarr import probe as probe_mod
+        from probarr.sources.base import Stream
+
+        meta = {"has_video": True, "width": 1920, "height": 1080, "fps": 50.0,
+               "video_codec": "hevc", "video_profile": "Main",
+               "pix_fmt": "yuv420p", "audio_codec": "eac3", "audio_channels": 2,
+               "video_variant_count": 1, "declared_kbps": 0,
+               "container": "mpegts"}
+
+        def blank(**over):
+            cap = {"decode_errors": 3, "corruption_errors": 0,
+                  "corruption_startup": 0, "corruption_steady": 0,
+                  "corruption_per_sec": 0.0, "decoded_seconds": 0.0,
+                  "error_samples": ["Could not write header"],
+                  "capture_seconds": 2.0, "timed_out": False,
+                  "rate_limited": False, "dhash": None, "motion": None,
+                  "motion_frames": 0, "low_motion": False, "frame32": None,
+                  "low_contrast": False, "measured_kbps": 0,
+                  "sample_duration": 0.0, "thumb": None, "frame": None,
+                  "crop": None, "clip": None}
+            cap.update(over)
+            return cap
+
+        calls = []
+
+        def fake_capture(url, opts, thumb, frame=None, crop=None, clip=None):
+            calls.append(clip)
+            if clip is not None:
+                return blank()            # the clip output kills the command
+            return blank(thumb="/tmp/t.jpg", decoded_seconds=10.0,
+                        measured_kbps=2402, decode_errors=0)
+
+        opts = probe_mod.ProbeOptions(capture_clip=True)
+        stream = Stream(id="s1", name="HEVC FHD Comedy Central", url="http://x/1")
+        with unittest.mock.patch.object(probe_mod, "probe_metadata", return_value=meta), \
+             unittest.mock.patch.object(probe_mod, "capture", side_effect=fake_capture):
+            result = probe_mod.probe(stream, opts, "/tmp/t.jpg", "/tmp/f.jpg",
+                                     "/tmp/c.jpg", "/tmp/clip.mp4")
+
+        self.assertEqual(calls, ["/tmp/clip.mp4", None])   # asked again, no clip
+        self.assertEqual(result["status"], probe_mod.STATUS_OK)
+        self.assertTrue(result.get("clip_skipped"))
+
+    def test_the_clipless_retry_is_not_a_backoff_attempt(self):
+        # A deterministic muxer failure fails identically every time, so
+        # retrying the same broken command on a 3s/8s/20s backoff is pure
+        # waste -- which is exactly what was observed in production (four
+        # attempts over ~31s, all failing the same way). The clipless retry
+        # must happen FIRST and immediately, with no sleep.
+        import unittest.mock
+        from probarr import probe as probe_mod
+        from probarr.sources.base import Stream
+
+        meta = {"has_video": True, "width": 1920, "height": 1080, "fps": 50.0,
+               "video_codec": "hevc", "video_profile": "", "pix_fmt": "yuv420p",
+               "audio_codec": "eac3", "audio_channels": 2,
+               "video_variant_count": 1, "declared_kbps": 0,
+               "container": "mpegts"}
+        good = {"decode_errors": 0, "corruption_errors": 0,
+               "corruption_startup": 0, "corruption_steady": 0,
+               "corruption_per_sec": 0.0, "decoded_seconds": 10.0,
+               "error_samples": [], "capture_seconds": 10.0, "timed_out": False,
+               "rate_limited": False, "dhash": None, "motion": 5.0,
+               "motion_frames": 20, "low_motion": False, "frame32": None,
+               "low_contrast": False, "measured_kbps": 2402,
+               "sample_duration": 10.0, "thumb": "/tmp/t.jpg", "frame": None,
+               "crop": None, "clip": None}
+        bad = {**good, "thumb": None, "decoded_seconds": 0.0,
+              "measured_kbps": 0, "decode_errors": 3}
+
+        sleeps = []
+
+        def fake_capture(url, opts, thumb, frame=None, crop=None, clip=None):
+            return dict(bad) if clip is not None else dict(good)
+
+        opts = probe_mod.ProbeOptions(capture_clip=True)
+        stream = Stream(id="s1", name="X", url="http://x/1")
+        with unittest.mock.patch.object(probe_mod, "probe_metadata", return_value=meta), \
+             unittest.mock.patch.object(probe_mod, "capture", side_effect=fake_capture), \
+             unittest.mock.patch.object(probe_mod.time, "sleep", sleeps.append):
+            result = probe_mod.probe(stream, opts, "/tmp/t.jpg", "/tmp/f.jpg",
+                                     "/tmp/c.jpg", "/tmp/clip.mp4")
+
+        self.assertEqual(sleeps, [], "must not back off before dropping the clip")
+        self.assertEqual(result["status"], probe_mod.STATUS_OK)
+
+
 class TestReprobeSampleLength(Temp):
     """A plain single ↻ re-probe used to inherit the full unattended-Verify
     sample length (cfg["sample_seconds"], 8-10s by default) -- a leftover
