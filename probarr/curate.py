@@ -165,6 +165,16 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
   align-items:center;justify-content:center;z-index:200;gap:10px}
 .lb2.on{display:flex}
 .lb2 img{max-width:96vw;max-height:80vh;object-fit:contain;background:#000}
+/* A watermark crop's max-width/max-height alone do nothing useful here --
+   those only ever SHRINK an oversized image, and a marked area is usually
+   a few dozen pixels natively, well under either limit already. Forcing
+   an explicit width is what actually makes "enlarged" mean anything for
+   an image this small; the browser's own upscaling handles the rest.
+   Softness at this size is expected and inherent to the source
+   resolution, not a bug -- the point is making it BIG enough to look at,
+   not making it look native-resolution-sharp. */
+.lb2 img.wm-big{width:50vw;max-width:50vw;height:auto;max-height:80vh;
+  object-fit:contain;image-rendering:pixelated}
 .lb2 .bar2{display:flex;gap:8px;align-items:center;color:var(--dim);font-size:12px}
 .saveind{font-size:11px;color:var(--faint)}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;
@@ -1172,6 +1182,7 @@ function zoom(id){
   const c=(ch.candidates||[]).find(x=>x.id===id); if(!c||!c.frame) return;
   lbCand=c; lbFull=true; lbIsWatermark=false;
   document.getElementById("lbmode").style.display = "";
+  document.getElementById("lb2").querySelector("img").classList.remove("wm-big");
   paintLB();
   document.getElementById("lb2").classList.add("on");
 }
@@ -1186,8 +1197,16 @@ function zoomWatermark(id){
   const c=(ch.candidates||[]).find(x=>x.id===id); if(!c) return;
   lbIsWatermark = true;
   const lb=document.getElementById("lb2");
-  lb.querySelector("img").src = "/run/"+encodeURIComponent(DATA.run_id)+
+  const img = lb.querySelector("img");
+  img.src = "/run/"+encodeURIComponent(DATA.run_id)+
     "/watermark?key="+encodeURIComponent(id);
+  // Explicitly forced large -- max-width/max-height alone only ever
+  // SHRINK an oversized image, and a marked area is typically a few dozen
+  // native pixels, nowhere near either limit. Without an explicit width
+  // this "enlarged" view would show the exact same tiny image as the
+  // card did, just alone on a dark background -- which is not what
+  // "enlarged" was asked for.
+  img.classList.add("wm-big");
   document.getElementById("lbmode").style.display = "none";
   document.getElementById("lbcap").textContent =
     c.name + " \u2014 marked watermark area, enlarged (native pixels upscaled "+
