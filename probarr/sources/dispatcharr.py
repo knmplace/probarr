@@ -121,12 +121,29 @@ class Dispatcharr:
 
     # -- reading ------------------------------------------------------------
     def streams(self):
+        """Every stream Dispatcharr is actually willing to use right now.
+
+        Real feedback (Discord): using Dispatcharr as a probe SOURCE pulled
+        every stream from every M3U account it had ever ingested, including
+        ones the operator had switched off in Dispatcharr's own UI (`is_active
+        =False` on the account -- Dispatcharr's own toggle for "stop using
+        this provider without deleting it"). A disabled account's streams are
+        exactly the ones an operator does NOT want probed or matched into a
+        wantlist; showing them anyway meant Curate filled up with channels
+        from a provider that had been turned off on purpose. Custom streams
+        (probarr's own, and any created by hand) carry no m3u_account at all
+        and are kept regardless -- they were never subject to an account
+        toggle in the first place.
+        """
+        accounts = {a["id"]: a for a in self.paged("/api/m3u/accounts/")}
         return [
             Stream(id=f"dispatcharr:{s['id']}", name=s["name"], url=s["url"],
                    group=str(s.get("channel_group") or ""),
                    logo=s.get("logo_url") or "", tvg_id=s.get("tvg_id") or "",
                    source="dispatcharr", attrs={"dispatcharr_id": s["id"]})
             for s in self.paged("/api/channels/streams/")
+            if s.get("m3u_account") is None
+            or accounts.get(s["m3u_account"], {}).get("is_active", True)
         ]
 
     def channels(self):

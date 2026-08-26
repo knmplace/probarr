@@ -1416,6 +1416,50 @@ class FakeDispatcharrClient:
         pass
 
 
+class TestDispatcharrStreamsSkipsDisabledAccounts(unittest.TestCase):
+    """Real feedback (Discord): using Dispatcharr AS A PROVIDER pulled every
+    stream from every M3U account it had ever ingested, including ones
+    switched off (is_active=False) in Dispatcharr's own UI -- exactly the
+    streams an operator does NOT want probed or matched into a wantlist.
+    Distinct from "Import from Dispatcharr" in Curate, which reads
+    Dispatcharr's existing CHANNELS and matches them against the run's own
+    separately-configured provider pool -- this bug was specific to
+    streams(), the raw-catalogue path used when Dispatcharr itself is
+    configured as a probarr provider.
+    """
+
+    def _client(self, accounts, streams):
+        from probarr.sources.dispatcharr import Dispatcharr
+        client = Dispatcharr("http://fake", "u", "p")
+
+        def fake_api(method, path, body=None):
+            if path.startswith("/api/m3u/accounts/"):
+                return {"results": accounts}
+            if path.startswith("/api/channels/streams/"):
+                return {"results": streams}
+            raise AssertionError(f"unexpected call: {method} {path}")
+        client.api = fake_api
+        return client
+
+    def test_streams_from_a_disabled_account_are_excluded(self):
+        accounts = [{"id": 1, "is_active": True}, {"id": 2, "is_active": False}]
+        streams = [{"id": 10, "name": "Active One", "url": "http://x/1",
+                   "m3u_account": 1},
+                  {"id": 11, "name": "Disabled One", "url": "http://x/2",
+                   "m3u_account": 2}]
+        client = self._client(accounts, streams)
+        names = [s.name for s in client.streams()]
+        self.assertEqual(names, ["Active One"])
+
+    def test_a_custom_stream_with_no_m3u_account_is_kept(self):
+        accounts = [{"id": 1, "is_active": False}]
+        streams = [{"id": 10, "name": "Custom", "url": "http://x/1",
+                   "m3u_account": None}]
+        client = self._client(accounts, streams)
+        names = [s.name for s in client.streams()]
+        self.assertEqual(names, ["Custom"])
+
+
 class TestDispatcharrLogoPush(unittest.TestCase):
     """The bug behind the user's own suspicion: a logo picked from
     anywhere OTHER than the M3U's own tvg-logo (a saved EPG source's icon,
