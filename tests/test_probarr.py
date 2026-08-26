@@ -1519,6 +1519,55 @@ class TestWatermarkCrop(Temp):
         name_b = crop_with({"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.1})
         self.assertNotEqual(name_a, name_b)
 
+    def test_a_re_probed_frame_invalidates_the_cached_crop_even_with_the_same_box(self):
+        # Real bug, caught live: a candidate re-probed after its watermark
+        # crop was already cached kept serving the OLD crop indefinitely --
+        # "the file already exists" was the only check, so a completely
+        # different picture underneath the same unchanged box never got
+        # noticed. The box's own hash only invalidates when the MARKED
+        # AREA changes; a re-probe changes the PICTURE, not the area.
+        import time
+        import unittest.mock
+        from probarr.store import RunStore
+
+        store = RunStore(self.root, "run1")
+        store.write_selection({"BBCONE": {"watermark_box":
+                               {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.1}}})
+        frame_path = store.frame_path("BBCONE|s1")
+        os.makedirs(os.path.dirname(frame_path), exist_ok=True)
+
+        def do_crop(marker):
+            with open(frame_path, "wb") as f:
+                f.write(marker)
+            h, sent = self._handler()
+            with unittest.mock.patch("probarr.web.subprocess") as fake_subprocess:
+                fake_subprocess.CalledProcessError = Exception
+                fake_subprocess.TimeoutExpired = Exception
+                def fake_run(cmd, **kw):
+                    # A real crop's bytes are derived from the source frame;
+                    # standing in for that here with the same marker so the
+                    # test can tell "regenerated from the new frame" apart
+                    # from "served the stale cached file" by content, not
+                    # just by whether ffmpeg was invoked.
+                    with open(cmd[-1], "wb") as f:
+                        f.write(marker)
+                fake_subprocess.run.side_effect = fake_run
+                h._watermark_crop("run1", "BBCONE|s1")
+            out_name = sent[0][1][1]
+            with open(os.path.join(store.dir, "watermarks", out_name), "rb") as f:
+                return f.read()
+
+        first = do_crop(b"original broadcast frame")
+        self.assertEqual(first, b"original broadcast frame")
+
+        # The frame file's mtime must genuinely be newer than the cached
+        # crop's for this to be a fair test of the staleness check, not an
+        # accident of both happening within the same filesystem-timestamp
+        # tick.
+        time.sleep(1.05)
+        second = do_crop(b"re-probed, totally different content")
+        self.assertEqual(second, b"re-probed, totally different content")
+
 
 class TestEpgSourceConsensus(Temp):
     """probarr never scored EPG matches against each other or read a

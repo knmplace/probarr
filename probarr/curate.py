@@ -909,7 +909,24 @@ function renderList(){
   document.getElementById("diagfilteredcount").textContent = list.length;
 }
 
-function specHTML(c){
+// The channel's own most common declared aspect ratio, not a hardcoded
+// 16:9 -- a handful of real UK channels are still 4:3 or otherwise
+// non-widescreen, and hardcoding 16:9 would flag every single one of
+// THEIR candidates as wrong instead of the genuinely mismatched one. Mode,
+// not mean: outliers (the actual thing being detected) must not be
+// allowed to drag the "normal" value toward themselves.
+function dominantAspect(ch){
+  const counts = new Map();
+  for(const c of (ch.candidates||[])){
+    if(!c.w || !c.h) continue;
+    const r = Math.round((c.w/c.h)*100)/100;
+    counts.set(r, (counts.get(r)||0)+1);
+  }
+  let best=null, bestN=0;
+  for(const [r,n] of counts) if(n>bestN){ best=r; bestN=n; }
+  return best;
+}
+function specHTML(c, expectedAspect){
   const out=[];
   if(c.dropped) out.push(['<span class="spec err" title="Dispatcharr\'s own '+
     'event log: this exact stream has genuinely failed over '+c.dropped+
@@ -917,6 +934,24 @@ function specHTML(c){
     'would rather not see it.">',
     '\u26a0 dropped '+c.dropped+'\u00d7', '</span>']);
   if(c.w) out.push(['<span class="spec hi">',c.w+"\u00d7"+c.h+(c.fps?"@"+c.fps:""),'</span>']);
+  // A different WIDTH at the same declared height is the visible signature
+  // of a stretched/squashed picture -- the whole reason a watermark crop
+  // (same fractional box, different absolute pixels per candidate) makes a
+  // wrong aspect ratio obvious to spot by eye without watching the stream.
+  // 3% tolerance: real widescreen sources round to slightly different
+  // w/h ratios from rounding alone (1920x1080 vs 1280x720 are both
+  // "16:9" but not bit-identical as a fraction); anything past that is a
+  // genuinely different shape, not rounding noise.
+  if(c.w && c.h && expectedAspect){
+    const ratio = c.w/c.h;
+    if(Math.abs(ratio-expectedAspect)/expectedAspect > 0.03){
+      out.push(['<span class="spec err" title="This channel\u2019s other '+
+        'candidates are mostly '+expectedAspect.toFixed(2)+':1 \u2014 this '+
+        'one declares '+ratio.toFixed(2)+':1. Likely stretched or letterboxed '+
+        'wrong, not just a different resolution.">',
+        'aspect ratio off','</span>']);
+    }
+  }
   if(c.kbps) out.push(['<span class="spec hi">',c.kbps+" kbps",'</span>']);
   if(c.vcodec) out.push(['<span class="spec">',c.vcodec,'</span>']);
   if(c.acodec) out.push(['<span class="spec">',c.acodec+(c.ach?" "+c.ach+"ch":""),'</span>']);
@@ -1086,6 +1121,7 @@ function renderDetail(){
           // special" reads as a cap of two, when any candidate below can be
           // added with + Add to channel, in any number.
           const ids = chosenIds(ch);
+          const expectedAspect = dominantAspect(ch);
           let div = "";
           return orderedCands(ch).map((c,i)=>{
           const used = ids.indexOf(c.id);
@@ -1115,7 +1151,7 @@ function renderDetail(){
             '</div>' : '')+
           '<div class="cbody"><div class="sname" title="'+esc(c.name)+'">'+esc(c.name)+
             ' <span class="n" style="color:var(--faint)">#'+c.rank+' ranked</span></div>'+
-            '<div class="specs">'+specHTML(c)+'</div>'+
+            '<div class="specs">'+specHTML(c, expectedAspect)+'</div>'+
             '<div class="actions">'+
               '<button data-act="use">'+(used>=0?"Remove from channel":"+ Add to channel")+'</button>'+
               (c.clip ? '<button data-act="clip" title="Watch the last captured clip">\u25b6</button>' : '')+

@@ -2014,7 +2014,18 @@ class Handler(BaseHTTPRequestHandler):
         out_dir = os.path.join(store.dir, "watermarks")
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, f"{RunStore.safe_name(rec_key)}-{box_hash}.jpg")
-        if not os.path.isfile(out_path):
+        # Stale, not just missing: a candidate can be re-probed (Diagnose,
+        # a single re-probe, a fresh Verify pass) any time after its crop
+        # was first cached, overwriting frame_path with genuinely
+        # different content -- confirmed live, a channel's screenshot had
+        # visibly moved on from a re-probe while its watermark crop kept
+        # showing the OLD picture, because "the file already exists" was
+        # the only check here. The box's own hash already invalidates a
+        # crop when the MARKED AREA changes; this is the other half --
+        # invalidating it when the PICTURE underneath it changes instead.
+        stale = (os.path.isfile(out_path)
+                and os.path.getmtime(frame_path) > os.path.getmtime(out_path))
+        if not os.path.isfile(out_path) or stale:
             ffmpeg = os.environ.get("PROBARR_FFMPEG", "ffmpeg")
             # A marked area is often a small fraction of an already
             # modest-resolution frame -- confirmed live, a ~7%x5% box on a
