@@ -13,6 +13,7 @@ import datetime
 import io
 import json
 import os
+import pathlib
 import re
 import shutil
 import sys
@@ -1546,7 +1547,10 @@ class TestEpgList(Temp):
         with open(xml, "w", encoding="utf-8") as f:
             f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
         from probarr import epgsources
-        epgsources.save(self.root, "test-guide", "file://" + xml)
+        # KNM fix (probarr-9wl): pathlib.as_uri(), not string concat --
+        # "file://" + xml is malformed on Windows (file://B:\...) and
+        # fails in urlopen; as_uri() produces a real file:///B:/... URL.
+        epgsources.save(self.root, "test-guide", pathlib.Path(xml).as_uri())
 
     def test_collapses_sd_hd_pairs_to_one_row(self):
         from probarr import epgcheck
@@ -1720,7 +1724,10 @@ class TestExpectedNowHonoursExplicitEpgSource(Temp):
         with open(xml, "w", encoding="utf-8") as f:
             f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
         from probarr import epgsources
-        epgsources.save(self.root, name, "file://" + xml)
+        # KNM fix (probarr-9wl): pathlib.as_uri(), not string concat --
+        # "file://" + xml is malformed on Windows (file://B:\...) and
+        # fails in urlopen; as_uri() produces a real file:///B:/... URL.
+        epgsources.save(self.root, name, pathlib.Path(xml).as_uri())
 
     def _record(self):
         return {"channel_key": "NATGEO", "stream_name": "National Geographic",
@@ -1920,7 +1927,10 @@ class TestEpgSourceConsensus(Temp):
         with open(xml, "w", encoding="utf-8") as f:
             f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
         from probarr import epgsources
-        epgsources.save(self.root, name, "file://" + xml)
+        # KNM fix (probarr-9wl): pathlib.as_uri(), not string concat --
+        # "file://" + xml is malformed on Windows (file://B:\...) and
+        # fails in urlopen; as_uri() produces a real file:///B:/... URL.
+        epgsources.save(self.root, name, pathlib.Path(xml).as_uri())
 
     def test_word_set_ignores_punctuation_and_case(self):
         from probarr.epgcheck import _word_set
@@ -2014,7 +2024,10 @@ class TestEpgConsensus(Temp):
         with open(xml, "w", encoding="utf-8") as f:
             f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
         from probarr import epgsources
-        epgsources.save(self.root, "test-guide", "file://" + xml)
+        # KNM fix (probarr-9wl): pathlib.as_uri(), not string concat --
+        # "file://" + xml is malformed on Windows (file://B:\...) and
+        # fails in urlopen; as_uri() produces a real file:///B:/... URL.
+        epgsources.save(self.root, "test-guide", pathlib.Path(xml).as_uri())
 
     def test_display_clean_leaves_ordinary_names_alone(self):
         from probarr import epgcheck
@@ -2157,8 +2170,12 @@ class TestPageTemplates(unittest.TestCase):
         # unrelated Delete button's listener in the same block). Scanning
         # web.py here too is what would have caught it before it shipped.
         for path in ("probarr/curate.py", "probarr/pages.py", "probarr/web.py"):
+            # KNM fix (probarr-vyx): explicit encoding, not the platform
+            # default -- on Windows that's cp1252, and web.py contains a
+            # byte that isn't valid cp1252, erroring the test outright.
             with open(os.path.join(os.path.dirname(
-                    os.path.dirname(os.path.abspath(__file__))), path)) as f:
+                    os.path.dirname(os.path.abspath(__file__))), path),
+                    encoding="utf-8") as f:
                 src = f.read()
             for m in re.finditer(r'^([A-Z_]+) = (r?)"""<!doctype', src, re.M):
                 self.assertEqual(m.group(2), "r",
