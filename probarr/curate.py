@@ -72,47 +72,25 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
   padding:0 0 0 6px;vertical-align:1px}
 #titleedit:hover{color:var(--accent)}
 .dhead .sub{color:var(--dim);font-size:12px;margin-bottom:8px}
-#diagnosebtn,#epgcheckbtn,#groupbtn,#removechanbtn,#dupchanbtn,
-#watermarkbtn,#clearwatermarkbtn,
+#groupedit{background:none;border:0;color:var(--faint);cursor:pointer;font-size:12px;
+  padding:0 0 0 4px;vertical-align:-1px}
+#groupedit:hover{color:var(--accent)}
+#diagnosebtn,#epgcheckbtn,#removechanbtn,#dupchanbtn,
+#watermarkbtn,#clearwatermarkbtn,#changesbtn,
 #findstreamsbtn{
   font-size:12px;padding:5px 10px;margin-right:8px}
 #removechanbtn{border-color:var(--bad);color:var(--bad)}
 #removechanbtn:hover{background:var(--bad);color:#3a0000}
-.epg{margin:10px 0 14px;padding:10px 12px;background:var(--panel);
-  border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:var(--radius)}
-.epg .lbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint)}
-.epg .ttl{font-size:15px;font-weight:600;margin:2px 0}
-.epg .dsc{color:var(--dim);font-size:12px}
-.epg.none{border-left-color:var(--faint)}
-/* Per-candidate, not the channel-level summary above -- what the guide
-   said was airing at THIS candidate's own probe moment, so the picture
-   can be checked against a guide entry that actually describes when it
-   was taken, not just the channel's first-ranked candidate's. Same
-   left-accent-bar language as .epg, scaled down to sit inline in a
-   candidate row rather than announce itself as its own section. */
+/* What the guide said was airing at THIS candidate's own probe moment --
+   the channel-level summary this used to sit under is gone (the modal's
+   own per-source EPG check plus this per-candidate line cover the same
+   ground without a third, redundant place to look). */
 .cand-epg{margin-top:5px;padding:4px 8px;background:var(--bg2);
   border-left:2px solid var(--accent);border-radius:3px;font-size:11.5px;
   color:var(--dim);display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
 .cand-epg .lbl{color:var(--faint);text-transform:uppercase;font-size:9.5px;
   letter-spacing:.4px;flex:none}
 .cand-epg .ttl{color:var(--text);font-weight:600}
-.epgnow{margin-top:8px;padding-top:7px;border-top:1px solid var(--line);
-  font-size:12px;color:var(--dim);display:flex;flex-direction:column;gap:3px}
-.epgnow .src{color:var(--faint);font-weight:600;min-width:96px;display:inline-block}
-.epgnow .now{color:var(--text)}
-.epgnow .win{color:var(--dim)}
-.epgnow .none{font-style:italic;color:var(--faint)}
-.epgnow .cur{color:var(--accent)}
-.epg-winner{font-size:12.5px;color:var(--text);padding:5px 8px;margin-bottom:4px;
-  border:1px solid var(--line);border-radius:6px;background:var(--bg2);
-  display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.epg-winner.consensus{border-color:var(--accent2)}
-.epg-winner.none{font-style:italic;color:var(--faint);background:transparent}
-.epg-score{color:var(--faint);font-size:11px}
-.epg-consensus-tag{background:var(--accent2);color:#04222c;font-weight:600;
-  font-size:10px;padding:1px 6px;border-radius:8px;text-transform:uppercase}
-.epg-winner-logo{height:18px;width:auto;max-width:60px;object-fit:contain;
-  border-radius:3px;background:#fff;padding:1px}
 /* A list, not a grid. The order of the list IS the channel's stream order,
    which is how Dispatcharr stores a channel anyway -- so what you drag is
    literally what gets pushed, and there is no longer a hard limit of two.
@@ -351,10 +329,8 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
 .offbox button{margin-left:10px;font-size:12px;padding:3px 9px}
 .chbox{background:rgba(240,173,78,.08);border:1px solid var(--warn);
   border-radius:var(--radius);padding:8px 11px;margin-bottom:10px;font-size:12.5px}
-.chbox b{color:var(--warn);display:block;margin-bottom:3px;font-size:12px}
 .chbox ul{margin:0;padding-left:17px}
 .chbox li{margin:1px 0;color:var(--dim)}
-.chtoggle{cursor:pointer;display:block}
 .dpip{margin-left:5px;font-size:9.5px;font-weight:700;color:var(--bg);
   background:var(--dim);border-radius:3px;padding:0 3px;vertical-align:1px}
 .grp-list{display:flex;flex-wrap:wrap;gap:6px;max-height:150px;overflow:auto}
@@ -1061,22 +1037,6 @@ function renderDetail(){
     '&middot; <code>f</code> fallback &middot; <code>Enter</code> confirm and advance'+
     '</div></div>'; return; }
   const s=SEL[ch.key]||{};
-  let epg;
-  if(ch.missing){ epg=""; }
-  else if(ch.expected){
-    epg='<div class="epg"><div class="lbl">Guide said, at capture time '+
-      esc(ch.expected.window||"")+
-      (s.epg_source?'<span class="em-current-tag">using: '+esc(s.epg_source)+'</span>':'')+
-      '</div><div class="ttl">'+esc(ch.expected.title)+
-      '</div>'+(ch.expected.desc?'<div class="dsc">'+esc(ch.expected.desc)+'</div>':'')+
-      '<div class="epgnow" id="epgnow"></div>'+
-      '</div>';
-  } else {
-    epg='<div class="epg none"><div class="lbl">Guide</div>'+
-      '<div class="epgnow" id="epgnow"></div><div class="dsc">'+
-      'No EPG data for this channel &mdash; nothing to compare the picture against.'+
-      '</div></div>';
-  }
   const cands=(ch.candidates||[]);
   // needsHuman()/state() already know whether a PREVIOUSLY settled channel
   // has been re-flagged (its evidence moved since "This is fine" was
@@ -1096,14 +1056,18 @@ function renderDetail(){
                      : 'This is fine \u2014 stop asking')+'</button>'+
       '</div>'
     : '';
-  // Collapsed by default: a channel with nine real changes filled the
-  // whole screen with a list nobody asked to read in full, every single
-  // time the card was opened, pushing the actual picture below the fold.
+  // Collapsed by default, and the trigger lives in the button row now, not
+  // as its own always-visible banner -- a channel with nine real changes
+  // used to fill the whole screen with a list nobody asked to read in
+  // full, every single time the card was opened, pushing the actual
+  // picture below the fold.
   const changed = (ch.changes||[]).length
-    ? '<div class="chbox"><b class="chtoggle" data-chtoggle="1">'+
-      ch.changes.length+' change'+(ch.changes.length===1?'':'s')+
-      ' since the last scan \u2014 show</b><ul style="display:none">'+
+    ? '<div class="chbox" id="chlist" style="display:none"><ul>'+
       ch.changes.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul></div>'
+    : '';
+  const changesBtn = (ch.changes||[]).length
+    ? '<button id="changesbtn" data-chtoggle="chlist" title="What changed for '+
+      'this channel since the last scan.">Changes ('+ch.changes.length+')</button>'
     : '';
   // Exclude/Re-include applies to a channel with no matched candidates
   // just as well as one with them -- a real gap this used to have: a
@@ -1129,7 +1093,11 @@ function renderDetail(){
       '<span id="titletext" tabindex="0" title="Click to rename">'+esc(ch.title)+'</span>'+
       '<button id="titleedit" title="Rename this channel">\u270e</button></h1>'+
       '<div class="sub">'+esc(ch.why||"")+
-        (s.group?' &middot; group: <b>'+esc(s.group)+'</b>':'')+
+        (!ch.missing ? ' &middot; group: <b>'+esc(s.group||"none")+'</b>'+
+          '<button id="groupedit" title="Change this channel’s group (or a '+
+          'multi-selection’s) — carried through to Dispatcharr on the next '+
+          'push. The Groups view covers moving several channels around at '+
+          'once.">✎</button>' : '')+
         (ch.dispatcharr ? '<span class="dtag" title="This channel already '+
           'exists in Dispatcharr. The candidates below are what the provider '+
           'carries for it \u2014 the point of importing is to see whether any '+
@@ -1160,6 +1128,7 @@ function renderDetail(){
         includeBtn+
         '<button id="removechanbtn" class="danger" title="Remove this channel from '+
         'the run \u2014 optionally from Dispatcharr too.">Remove</button>'+
+        changesBtn+
         '<span class="muted" id="diagnosemsg"></span>' :
         '<button id="diagnosebtn" title="Re-scan every candidate for this channel with a '+
         'longer sample and a kept video clip \u2014 for when a channel misbehaves in a real '+
@@ -1167,9 +1136,6 @@ function renderDetail(){
         '<button id="epgcheckbtn" title="Compare every saved EPG source\'s live '+
         '\u2018now playing\u2019 for this channel, side by side with what the guide said '+
         'at capture time.">Check EPG</button>'+
-        '<button id="groupbtn" title="Put this channel (or a multi-selection) into a '+
-        'named group \u2014 carried through to Dispatcharr on the next push.">'+
-        (MARKED.size>1?'Set group ('+MARKED.size+')':'Set group')+'</button>'+
         '<button id="watermarkbtn" title="Draw a box around this channel\u2019s logo/'+
         'watermark on a known-good picture. Every candidate then shows that same '+
         'area cropped out of its own frame, right next to its screenshot \u2014 so a '+
@@ -1184,12 +1150,13 @@ function renderDetail(){
         includeBtn+
         '<button id="removechanbtn" class="danger" title="Remove this channel from '+
         'the run \u2014 optionally from Dispatcharr too.">Remove</button>'+
+        changesBtn+
         '<span class="muted" id="diagnosemsg"></span>')+
     '</div>'+
     (s.include === false ? '<div class="offbox">This channel is <b>excluded</b> \u2014 '+
       'left out of every export until you re-include it.'+
       '<button id="includebtn">Re-include this channel</button></div>' : '') +
-    whybox + changed + epg +
+    whybox + changed +
     (ch.missing
       ? '<div class="empty">No candidate streams matched this name.'+
         '<div class="hint">The usual cause is a naming difference, not a missing '+
@@ -1301,7 +1268,7 @@ function wireDrag(){
   });
 }
 
-function select(key){ current=key; renderList(); renderDetail(); loadEpgNow(key);
+function select(key){ current=key; renderList(); renderDetail();
   const el=document.querySelector('.chan.sel'); if(el) el.scrollIntoView({block:"nearest"});
   saveViewState(); }
 // Where you are is remembered in the URL, not just in memory -- a reload
@@ -1400,7 +1367,7 @@ document.addEventListener("click", e=>{
   if(e.target.id==="findstreamsbtn"){ openStreams(); return; }
   if(e.target.id==="settlebtn"){ settleChannel(); return; }
   if(e.target.id==="epgcheckbtn"){ openEpgModal(); return; }
-  if(e.target.id==="groupbtn"){ setGroup(); return; }
+  if(e.target.id==="groupedit"){ setGroup(); return; }
   if(e.target.id==="watermarkbtn"){ openWatermarkModal(); return; }
   if(e.target.id==="clearwatermarkbtn"){
     const s=SEL[current]=SEL[current]||{};
@@ -2445,88 +2412,6 @@ document.getElementById("grp-save").addEventListener("click", ()=>{
   applyGroup(typed || grpChoice);
 });
 
-// Fills the "what is on RIGHT NOW, per EPG source" rows under the captured
-// guide entry. The captured entry answers "what did the guide claim at the
-// moment this frame was grabbed", which is what makes the picture
-// checkable; these answer "and what does each source think is on now",
-// which is what makes the SOURCE checkable. Both are needed to tell a bad
-// stream from a bad guide.
-//
-// Loaded lazily per channel rather than embedded in the page payload: it is
-// a live lookup against every saved XMLTV source, ~18s cold while they are
-// parsed and ~0.3s afterwards from epgcheck.py's cache, so blocking the
-// page render on it would be far worse than filling it in a moment later.
-let epgNowSeq = 0;
-// Client-side cache on top of epgcheck.py's server-side one. The server
-// already avoids re-parsing the XMLTV files, but arrowing through a lineup
-// still cost a round trip per channel and a visible "checking..." flicker
-// on every revisit. Guide data only moves at programme boundaries, so a
-// few minutes of reuse is free accuracy-wise.
-const EPGNOW_CACHE = new Map();
-const EPGNOW_TTL = 240000;
-async function loadEpgNow(key){
-  const seq = ++epgNowSeq;
-  const box = document.getElementById("epgnow");
-  if(!box) return;
-  const hit = EPGNOW_CACHE.get(key);
-  if(hit && (Date.now() - hit.at) < EPGNOW_TTL){
-    renderEpgNow(key, hit.data);
-    return;
-  }
-  box.innerHTML = '<span class="none">checking guide sources\u2026</span>';
-  let d;
-  try{
-    d = await (await fetch("/run/"+encodeURIComponent(DATA.run_id)+
-      "/epg-check?key="+encodeURIComponent(key), {cache:"no-store"})).json();
-  }catch(e){ d = null; }
-  if(d && !d.error) EPGNOW_CACHE.set(key, {at: Date.now(), data: d});
-  // Channel may have changed while this was in flight; a stale answer
-  // rendered against the wrong channel is worse than none.
-  if(seq !== epgNowSeq || key !== current) return;
-  renderEpgNow(key, d);
-}
-function renderEpgNow(key, d){
-  const el = document.getElementById("epgnow");
-  if(!el) return;
-  if(!d || d.error || !d.sources || !d.sources.length){
-    el.innerHTML = '<span class="none">No saved EPG sources to compare against.</span>';
-    return;
-  }
-  const chosen = (SEL[key]||{}).epg_source;
-  // Which source's own name for this channel actually agrees with what the
-  // channel is called, word for word -- not just whichever is listed
-  // first. Shown even with only one saved source, so the badge means the
-  // same thing regardless of setup: "this is the source in charge of this
-  // channel's guide and logo right now."
-  const w = d.winner;
-  const winnerLine = w
-    ? '<div class="epg-winner' + (w.consensus ? ' consensus' : '') + '" ' +
-      'title="' + (w.consensus
-        ? 'Two or more saved sources independently agree on this match.'
-        : 'Only one saved source matched this channel -- nothing to agree with yet.') +
-      '">Best match: <b>' + esc(w.source) + '</b> → “' + esc(w.guide_name) +
-      '”' + (w.score ? ' <span class="epg-score">(' + w.score +
-      ' matching word' + (w.score===1?'':'s') + ')</span>' : '') +
-      (w.consensus ? ' <span class="epg-consensus-tag">consensus</span>' : '') +
-      (w.logo ? '<img class="epg-winner-logo" src="' + esc(w.logo) +
-        '" alt="" title="This source\'s icon -- only used as this channel\'s logo ' +
-        'if its own M3U stream supplied none.">' : '') +
-      '</div>'
-    : '<div class="epg-winner none">No source matched this channel by name.</div>';
-  el.innerHTML = winnerLine + d.sources.map(s2 => {
-    let body;
-    if(s2.error) body = '<span class="none">error: '+esc(s2.error)+'</span>';
-    else if(!s2.matched) body = '<span class="none">channel not in this source</span>';
-    else if(!s2.now) body = '<span class="none">nothing scheduled right now</span>';
-    else body = '<span class="now">'+esc(s2.now.title)+'</span>'+
-      (s2.now.window?' <span class="win">('+esc(s2.now.window)+')</span>':'');
-    const scoreTag = (s2.matched && s2.score)
-      ? ' <span class="epg-score">'+s2.score+'w</span>' : '';
-    return '<div><span class="src'+(s2.source===chosen?' cur':'')+'">'+
-      esc(s2.source)+':</span> '+body+scoreTag+'</div>';
-  }).join("");
-}
-
 // Live per-source EPG comparison: what does each SAVED EPG source say is on
 // this channel RIGHT NOW, versus what the run's own guide said at capture
 // time. Answers "is the guide I used still accurate, and is there a better
@@ -3168,10 +3053,8 @@ document.getElementById("detail").addEventListener("click", e => {
   if(e.target.id === "titletext" || e.target.id === "titleedit") startRename();
   const ct = e.target.closest("[data-chtoggle]");
   if(ct){
-    const ul = ct.nextElementSibling;
-    const open = ul.style.display === "none";
-    ul.style.display = open ? "block" : "none";
-    ct.textContent = ct.textContent.replace(/show|hide$/, open ? "hide" : "show");
+    const box = document.getElementById(ct.dataset.chtoggle);
+    if(box) box.style.display = box.style.display === "none" ? "block" : "none";
   }
 });
 // Click the dark backdrop (not the box itself) to close whichever modal is
