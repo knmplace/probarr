@@ -232,6 +232,23 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
 .em-captured{font-size:12px;color:var(--dim)}
 .em-captured .t{color:var(--text);font-weight:600}
 .em-current-tag{font-size:10.5px;color:var(--accent);margin-left:6px;font-weight:600}
+.em-logo-current{display:flex;align-items:center;gap:10px;background:var(--bg2);
+  border:1px solid var(--line);border-radius:var(--radius);padding:8px 10px;
+  font-size:12px;color:var(--dim);margin-bottom:8px}
+.em-logo-current img{height:32px;width:32px;object-fit:contain;background:var(--bg);
+  border-radius:4px}
+.em-logo-current .none{font-style:italic;color:var(--faint)}
+.em-logo-choices{display:flex;flex-wrap:wrap;gap:8px}
+.em-logo-opt{display:flex;flex-direction:column;align-items:center;gap:4px;
+  width:74px;background:var(--bg2);border:1px solid var(--line);
+  border-radius:var(--radius);padding:6px;cursor:pointer;text-align:center}
+.em-logo-opt:hover{border-color:var(--accent)}
+.em-logo-opt.picked{border-color:var(--accent);background:rgba(80,140,255,.08)}
+.em-logo-opt img{height:34px;width:100%;object-fit:contain;background:var(--bg);
+  border-radius:3px}
+.em-logo-opt .lbl{font-size:9.5px;color:var(--dim);line-height:1.25;
+  overflow:hidden;text-overflow:ellipsis;display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
 .dm-summary{display:flex;gap:8px;align-items:center;font-size:12.5px;color:var(--dim);
   background:var(--bg2);border:1px solid var(--line);border-radius:var(--radius);
   padding:7px 10px;margin-bottom:10px}
@@ -629,6 +646,24 @@ __TOPBAR__
           style="width:auto;flex:1">
       </div>
       <div id="em-search-results" class="cat-results" style="margin-top:8px"></div>
+    </div>
+
+    <div class="mfield">
+      <label>Logo</label>
+      <div class="sub" style="margin:-4px 0 8px">Pick which picture represents this
+        channel: the provider's own, whichever matched EPG source's icon, or search
+        the wider <a href="https://github.com/tv-logo/tv-logos" target="_blank"
+        rel="noopener">tv-logo/tv-logos</a> catalogue. Every option here links straight
+        to its own source's hosting &mdash; probarr never downloads or stores the
+        image itself.</div>
+      <div id="em-logo-current" class="em-logo-current"></div>
+      <div id="em-logo-choices" class="em-logo-choices"></div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <select id="em-logo-country" style="width:170px;flex:none"></select>
+        <input type="text" id="em-logo-q" placeholder="search by channel name&hellip;"
+          style="width:auto;flex:1">
+      </div>
+      <div id="em-logo-results" class="em-logo-choices" style="margin-top:8px"></div>
     </div>
 
     <div class="mresult" id="em-result"></div>
@@ -2522,7 +2557,128 @@ async function openEpgModal(){
     '<option value="'+esc(s.source)+'">'+esc(s.source)+'</option>').join("");
   document.getElementById("em-search-q").value = "";
   document.getElementById("em-search-results").innerHTML = "";
+
+  epgSourcesCache = data.sources;
+  renderLogoSection(ch, data.sources);
 }
+
+// --- Logo picker ---------------------------------------------------------
+// Lives inside the EPG modal on purpose (the user's own framing for this:
+// "the EPG menu allows us to choose a channel exactly like we do, then it
+// offers us the default logo, the logo from the other EPG matches it's
+// found, or to search all logos") -- a channel's logo and its guide match
+// are already the same decision-making moment, not two separate ones.
+//
+// Every option rendered here is a link to someone else's hosting -- the
+// provider's own tvg-logo, a saved EPG source's <icon>, or a
+// raw.githubusercontent.com URL from tv-logo/tv-logos (CC BY-SA 4.0).
+// probarr never fetches or stores the image bytes itself; see logos.py's
+// module docstring for why that distinction is the whole point.
+let LOGO_COUNTRIES = null;
+async function ensureLogoCountries(){
+  if(LOGO_COUNTRIES) return LOGO_COUNTRIES;
+  try{
+    const d = await (await fetch("/run/"+encodeURIComponent(DATA.run_id)+
+      "/logo-countries", {cache:"no-store"})).json();
+    LOGO_COUNTRIES = d.countries || [];
+  }catch(e){ LOGO_COUNTRIES = []; }
+  return LOGO_COUNTRIES;
+}
+function logoOptHTML(url, label, picked){
+  return '<div class="em-logo-opt'+(picked?' picked':'')+'" data-logo-url="'+esc(url)+'" '+
+    'title="'+esc(label)+'"><img src="'+esc(url)+'" alt="" loading="lazy">'+
+    '<div class="lbl">'+esc(label)+'</div></div>';
+}
+async function renderLogoSection(ch, epgSources){
+  const sel = SEL[current] || {};
+  const override = sel.logo_override || "";
+  const m3uLogo = (ch.candidates||[]).map(c=>c.logo).find(Boolean) || "";
+  const curEl = document.getElementById("em-logo-current");
+  const activeUrl = override || m3uLogo ||
+    (epgSources.find(s=>s.logo) || {}).logo || "";
+  curEl.innerHTML = activeUrl
+    ? '<img src="'+esc(activeUrl)+'" alt="">'+
+      '<span>'+(override ? 'Using the picked logo below.'
+        : m3uLogo ? 'Using the provider’s own logo (no pick made yet).'
+        : 'Using a matched EPG source’s icon (no pick made yet).')+'</span>'
+    : '<span class="none">No logo available for this channel yet.</span>';
+
+  const seen = new Set();
+  const opts = [];
+  if(m3uLogo && !seen.has(m3uLogo)){
+    seen.add(m3uLogo);
+    opts.push(logoOptHTML(m3uLogo, "Provider default", m3uLogo===override ||
+      (!override && m3uLogo===activeUrl)));
+  }
+  for(const s of epgSources){
+    if(s.logo && !seen.has(s.logo)){
+      seen.add(s.logo);
+      opts.push(logoOptHTML(s.logo, s.source, s.logo===override ||
+        (!override && s.logo===activeUrl)));
+    }
+  }
+  if(override && !seen.has(override)){
+    opts.push(logoOptHTML(override, "Picked", true));
+  }
+  document.getElementById("em-logo-choices").innerHTML = opts.join("") ||
+    '<div class="sub">No default or EPG-source logo found for this channel.</div>';
+
+  const countrySel = document.getElementById("em-logo-country");
+  if(!countrySel.dataset.loaded){
+    const countries = await ensureLogoCountries();
+    countrySel.innerHTML = countries.map(c =>
+      '<option value="'+esc(c)+'"'+(c==="united-kingdom"?" selected":"")+'>'+
+      esc(c)+'</option>').join("");
+    countrySel.dataset.loaded = "1";
+  }
+  document.getElementById("em-logo-q").value = "";
+  document.getElementById("em-logo-results").innerHTML = "";
+}
+function pickLogo(url){
+  SEL[current] = {...(SEL[current]||{}), logo_override: url};
+  save();
+  const ch = DATA.channels.find(c=>c.key===current);
+  renderLogoSection(ch, epgSourcesCache || []);
+  renderDetail();
+}
+let epgSourcesCache = null;
+document.getElementById("em-logo-choices").addEventListener("click", (e) => {
+  const opt = e.target.closest(".em-logo-opt"); if(!opt) return;
+  pickLogo(opt.dataset.logoUrl);
+});
+document.getElementById("em-logo-results").addEventListener("click", (e) => {
+  const opt = e.target.closest(".em-logo-opt"); if(!opt) return;
+  pickLogo(opt.dataset.logoUrl);
+});
+let logoSearchTimer = null;
+function runLogoSearch(){
+  clearTimeout(logoSearchTimer);
+  logoSearchTimer = setTimeout(async () => {
+    const country = document.getElementById("em-logo-country").value;
+    const q = document.getElementById("em-logo-q").value.trim();
+    const box = document.getElementById("em-logo-results");
+    if(!country || q.length < 2){ box.innerHTML = ""; return; }
+    box.innerHTML = '<div class="sub">searching…</div>';
+    let data;
+    try{
+      data = await (await fetch("/run/"+encodeURIComponent(DATA.run_id)+
+        "/logo-search?country="+encodeURIComponent(country)+
+        "&q="+encodeURIComponent(q), {cache:"no-store"})).json();
+    }catch(e){
+      box.innerHTML = '<div class="sub">search failed</div>';
+      return;
+    }
+    const results = data.results || [];
+    if(!results.length){
+      box.innerHTML = '<div class="sub">no logos in "'+esc(country)+
+        '" match "'+esc(q)+'"</div>';
+      return;
+    }
+    box.innerHTML = results.map(r => logoOptHTML(r.url, r.filename, false)).join("");
+  }, 300);
+}
+document.getElementById("em-logo-q").addEventListener("input", runLogoSearch);
+document.getElementById("em-logo-country").addEventListener("change", runLogoSearch);
 
 // --- EPG manual search --------------------------------------------------
 // The algorithm already tries tvg-id then name matching; this is the

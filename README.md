@@ -272,6 +272,15 @@ None of this is literal ported code — different language, different
 architecture — but the design decisions are theirs first. Go look at what
 they've built; each does real things probarr doesn't.
 
+The in-app logo picker searches
+**[tv-logo/tv-logos](https://github.com/tv-logo/tv-logos)** (CC BY-SA 4.0),
+using the same GitHub-contents-API fetch approach Lineuparr uses for the same
+repository. probarr never downloads, mirrors, or redistributes a logo image —
+every result is a link straight to that repository's own
+`raw.githubusercontent.com` hosting, fetched directly by the browser (or by
+Dispatcharr, once a pick is pushed). probarr's own cache holds only the
+directory listings (country and filename lists), never image bytes.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

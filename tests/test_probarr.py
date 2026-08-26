@@ -1857,5 +1857,89 @@ class TestPageTemplates(unittest.TestCase):
                              f"{name} has an unbalanced script tag")
 
 
+class TestLogos(Temp):
+    """logos.py never touches image bytes -- only two small JSON listings
+    (country names, per-country filenames) ever get cached. These tests
+    mock the network entirely and check the caching and matching logic in
+    isolation from GitHub's actual API.
+    """
+
+    def test_search_prefers_the_closer_normalized_match(self):
+        from probarr import logos as logos_mod
+        from probarr.normalize import Normalizer
+        with unittest.mock.patch.object(
+                logos_mod, "fetch_country_logos",
+                return_value=["bbc-one-uk.png", "bbc-news-uk.png",
+                              "itv1-uk.png"]):
+            results = logos_mod.search(self.root, "UK: BBC One HD",
+                                       "united-kingdom", Normalizer())
+        self.assertTrue(results)
+        self.assertEqual(results[0]["filename"], "bbc-one-uk.png")
+        self.assertTrue(results[0]["url"].startswith(
+            "https://raw.githubusercontent.com/tv-logo/tv-logos/main/"
+            "countries/united-kingdom/"))
+
+    def test_search_with_no_country_or_query_returns_nothing_and_fetches_nothing(self):
+        from probarr import logos as logos_mod
+        from probarr.normalize import Normalizer
+        with unittest.mock.patch.object(
+                logos_mod, "fetch_country_logos") as fake_fetch:
+            self.assertEqual(logos_mod.search(self.root, "bbc one", "",
+                                              Normalizer()), [])
+            self.assertEqual(logos_mod.search(self.root, "", "united-kingdom",
+                                              Normalizer()), [])
+            fake_fetch.assert_not_called()
+
+    def test_fetch_country_logos_is_cached_to_disk_not_refetched(self):
+        from probarr import logos as logos_mod
+        logos_mod._mem.clear()
+        calls = []
+
+        def fake_get_json(url):
+            calls.append(url)
+            return [{"name": "bbc-one-uk.png", "type": "file"},
+                   {"name": "README.md", "type": "file"}]
+
+        with unittest.mock.patch.object(logos_mod, "_get_json", fake_get_json):
+            first = logos_mod.fetch_country_logos(self.root, "united-kingdom")
+            logos_mod._mem.clear()  # force the disk tier, not the in-memory one
+            second = logos_mod.fetch_country_logos(self.root, "united-kingdom")
+        self.assertEqual(first, ["bbc-one-uk.png"])
+        self.assertEqual(second, first)
+        self.assertEqual(len(calls), 1, "second call should have hit the disk cache")
+
+    def test_a_failed_fetch_yields_an_empty_list_not_an_exception(self):
+        from probarr import logos as logos_mod
+        logos_mod._mem.clear()
+        with unittest.mock.patch.object(
+                logos_mod, "_get_json", side_effect=OSError("network down")):
+            self.assertEqual(logos_mod.fetch_countries(self.root), [])
+            self.assertEqual(
+                logos_mod.fetch_country_logos(self.root, "united-kingdom"), [])
+
+    def test_resolve_curated_prefers_an_explicit_logo_override(self):
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+        store = RunStore(self.root, "run1")
+        store.append({"rec_key": "BBCONE|s1", "channel_key": "BBCONE",
+                      "stream_id": "s1", "stream_name": "BBC One",
+                      "status": "ok", "url": "http://x/1", "url_redacted": "",
+                      "group": "", "logo": "https://example.com/m3u-logo.png",
+                      "tvg_id": "", "probed_at": 1})
+        store.write_wantlist_raw(
+            [{"key": "BBCONE", "number": "101", "name": "BBC One"}], [])
+        store.write_selection({"BBCONE": {
+            "logo_override": "https://raw.githubusercontent.com/tv-logo/"
+                             "tv-logos/main/countries/united-kingdom/"
+                             "bbc-one-uk.png"}})
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        curated = h._resolve_curated(store)
+        ch = next(c for c in curated if c["key"] == "BBCONE")
+        self.assertEqual(ch["logo_url"],
+                         "https://raw.githubusercontent.com/tv-logo/tv-logos/"
+                         "main/countries/united-kingdom/bbc-one-uk.png")
+
+
 if __name__ == "__main__":
     unittest.main()

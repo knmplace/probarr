@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import backup as backup_mod
 from . import curate, decisions, pages, probequeue, providers as providers_mod
 from . import epgcheck as epgcheck_mod
+from . import logos as logos_mod
 from . import aliases as aliases_mod
 from . import lineups as lineups_mod
 from . import epgsources as epgsources_mod
@@ -305,6 +306,12 @@ class Handler(BaseHTTPRequestHandler):
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 return self._epg_search(run_id, qs.get("source", [""])[0],
                                         qs.get("q", [""])[0])
+            if parts[2] == "logo-countries":
+                return self._logo_countries(run_id)
+            if parts[2] == "logo-search":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                return self._logo_search(run_id, qs.get("country", [""])[0],
+                                         qs.get("q", [""])[0])
             if parts[2] == "file":
                 return self._file(run_id, parts[3:])
             if parts[2] == "thumbs":
@@ -775,7 +782,7 @@ class Handler(BaseHTTPRequestHandler):
                 pick = pick or {}
                 durable = {k: pick.get(k) for k in
                           ("epg_source", "group", "confirmed", "settled_on",
-                           "watermark_box")
+                           "watermark_box", "logo_override")
                           if pick.get(k)}
                 if durable:
                     lineups_mod.set_preference(self.root, lineup, key, **durable)
@@ -2049,6 +2056,26 @@ class Handler(BaseHTTPRequestHandler):
                                   "application/json", 500)
         return self._file(run_id, ["watermarks", os.path.basename(out_path)])
 
+    def _logo_countries(self, run_id):
+        """Country/region folder names available to search, for the picker's
+        dropdown. run_id is unused (the catalogue isn't per-run) but kept for
+        route symmetry with every other /run/<id>/... endpoint.
+        """
+        self._send(json.dumps({"countries": logos_mod.fetch_countries(self.root)}),
+                  "application/json")
+
+    def _logo_search(self, run_id, country_dir, query):
+        """Fuzzy-matched logo candidates from tv-logo/tv-logos for one
+        country, backing the logo picker's search box. Every result is a
+        link to GitHub's own hosting -- see logos.py's module docstring for
+        why that's the whole point, not an implementation detail.
+        """
+        if not country_dir:
+            return self._send(json.dumps({"results": []}), "application/json")
+        norm = self._norm()
+        results = logos_mod.search(self.root, query, country_dir, norm)
+        self._send(json.dumps({"results": results}), "application/json")
+
     def _epg_search(self, run_id, source_name, query):
         """One saved EPG source's channel names matching `query`, live --
         backs Check EPG's manual search box for when resolve() guessed
@@ -3086,7 +3113,12 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             fallback = picked[1] if len(picked) > 1 else None
             chan_tvg_id = tvg.get(ch["key"], "")
-            logo_url = primary.get("logo", "")
+            # An explicit logo picked in the logo browser is a deliberate
+            # curator decision -- the entire point of building it was to let
+            # a human override an automatic pick that's wrong or missing, so
+            # it outranks both the provider's own tvg-logo and the EPG
+            # fallback below, not just the EPG fallback.
+            logo_url = s.get("logo_override") or primary.get("logo", "")
             if not logo_url:
                 # The M3U itself supplied nothing -- fall back to whichever
                 # saved EPG source's own icon best agrees with this
