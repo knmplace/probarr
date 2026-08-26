@@ -57,6 +57,7 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
 #titleedit:hover{color:var(--accent)}
 .dhead .sub{color:var(--dim);font-size:12px;margin-bottom:8px}
 #diagnosebtn,#epgcheckbtn,#groupbtn,#removechanbtn,#dupchanbtn,
+#watermarkbtn,#clearwatermarkbtn,
 #findstreamsbtn{
   font-size:12px;padding:5px 10px;margin-right:8px}
 #removechanbtn{border-color:var(--bad);color:var(--bad)}
@@ -117,6 +118,16 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
 .cand .shot{position:relative;width:150px;flex:none;aspect-ratio:16/9;background:#000;
   cursor:zoom-in}
 .cand .shot img{width:100%;height:100%;object-fit:contain;display:block}
+/* The marked watermark area, cropped from this candidate's own frame --
+   deliberately the same height as .shot (align-items:stretch on .cand
+   already gives it that, for free) so it reads as a direct side-by-side,
+   not a different-sized afterthought. Width is whatever the crop's own
+   aspect ratio needs, not fixed -- a logo box is rarely 16:9. */
+.cand .wmshot{flex:none;background:#000;display:flex;align-items:center;
+  justify-content:center;border-left:1px solid var(--line)}
+.cand .wmshot img{height:100%;width:auto;max-width:120px;object-fit:contain;display:block}
+.cand .wmshot.wmshot-empty{width:40px}
+.cand .wmshot.wmshot-empty img{display:none}
 .cand .cbody{flex:1;min-width:0;padding:7px 10px;display:flex;flex-direction:column;
   justify-content:center;gap:4px}
 .cand .actions{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
@@ -596,6 +607,32 @@ __TOPBAR__
   </div>
 </div>
 
+<div class="modal" id="watermarkmodal">
+  <div class="modalbox" style="width:min(720px,96vw)">
+    <button class="modalx" id="wm-x" title="Close">✕</button>
+    <h3>Mark watermark area &mdash; <span id="wm-title"></span></h3>
+    <div class="sub">Drag a box around the logo/watermark on this known-good
+      picture. Every candidate will then show that same area (scaled to its
+      own resolution) cropped out of its own frame, right next to its
+      screenshot &mdash; so a wrong stream (right name, wrong feed) is
+      obvious to look at, not just inferred from a mismatched EPG.</div>
+    <div class="sub" id="wm-nopic" style="display:none">No captured frame to
+      draw on yet for this channel &mdash; probe or diagnose a candidate
+      first, then come back here.</div>
+    <div id="wm-imgwrap" style="position:relative;display:inline-block;
+      max-width:100%;line-height:0;cursor:crosshair">
+      <img id="wm-img" style="max-width:100%;display:block" draggable="false">
+      <div id="wm-box" style="position:absolute;border:2px solid var(--accent2);
+        background:rgba(88,166,255,.18);display:none;pointer-events:none"></div>
+    </div>
+    <div class="mresult" id="wm-result"></div>
+    <div class="mrow">
+      <button id="wm-save" disabled>Save area</button>
+      <button id="wm-close">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const DATA = __DATA__;
 // Matches the server's own auto-fallback depth (AUTO_FALLBACK_DEPTH in
@@ -971,6 +1008,14 @@ function renderDetail(){
         '<button id="groupbtn" title="Put this channel (or a multi-selection) into a '+
         'named group \u2014 carried through to Dispatcharr on the next push.">'+
         (MARKED.size>1?'Set group ('+MARKED.size+')':'Set group')+'</button>'+
+        '<button id="watermarkbtn" title="Draw a box around this channel\u2019s logo/'+
+        'watermark on a known-good picture. Every candidate then shows that same '+
+        'area cropped out of its own frame, right next to its screenshot \u2014 so a '+
+        'wrong stream (right name, wrong feed) is obvious at a glance, not just '+
+        'inferred from a mismatched EPG.">'+
+        (s.watermark_box ? 'Redraw watermark area' : 'Mark watermark area')+'</button>'+
+        (s.watermark_box ? '<button id="clearwatermarkbtn" title="Stop comparing '+
+        'this channel\u2019s candidates against a watermark area.">Clear</button>' : '')+
         '<button id="dupchanbtn" title="Make a second copy of this channel so '+
         'it can sit in another group as well \u2014 same streams, no re-probing.">'+
         'Duplicate</button>'+
@@ -1018,6 +1063,13 @@ function renderDetail(){
             '<div class="pill '+c.status+'">'+c.status+'</div>'+
             (i<9?'<div class="kbd">'+(i+1)+'</div>':'')+
           '</div>'+
+          (s.watermark_box ? '<div class="wmshot" title="The marked watermark '+
+            'area, cropped out of THIS candidate’s own frame — compare it '+
+            'by eye against the screenshot to its left.">'+
+            '<img loading="lazy" src="/run/'+encodeURIComponent(DATA.run_id)+
+            '/watermark?key='+encodeURIComponent(c.id)+'" alt="" '+
+            'onerror="this.closest(\'.wmshot\').classList.add(\'wmshot-empty\')">'+
+            '</div>' : '')+
           '<div class="cbody"><div class="sname" title="'+esc(c.name)+'">'+esc(c.name)+
             ' <span class="n" style="color:var(--faint)">#'+c.rank+' ranked</span></div>'+
             '<div class="specs">'+specHTML(c)+'</div>'+
@@ -1148,6 +1200,13 @@ document.addEventListener("click", e=>{
   if(e.target.id==="settlebtn"){ settleChannel(); return; }
   if(e.target.id==="epgcheckbtn"){ openEpgModal(); return; }
   if(e.target.id==="groupbtn"){ setGroup(); return; }
+  if(e.target.id==="watermarkbtn"){ openWatermarkModal(); return; }
+  if(e.target.id==="clearwatermarkbtn"){
+    const s=SEL[current]=SEL[current]||{};
+    delete s.watermark_box;
+    save(); renderList(); renderDetail();
+    return;
+  }
   if(e.target.id==="removechanbtn"){ removeChannel(); return; }
   if(e.target.id==="dupchanbtn"){ duplicateChannel(); return; }
   if(e.target.id==="includebtn" || e.target.id==="includebtn2"){ toggleInclude(); return; }
@@ -2397,6 +2456,104 @@ document.getElementById("em-close").addEventListener("click", () => {
 document.getElementById("em-x").addEventListener("click", () => {
   document.getElementById("epgmodal").classList.remove("on");
 });
+
+// --- Mark watermark area -------------------------------------------------
+// v1 is deliberately NOT automatic matching: no scoring, no threshold, no
+// false positives/negatives to tune. A human draws the box once against a
+// known-good picture; from then on every candidate just shows that same
+// area cropped out of its own frame, right next to its screenshot, and a
+// wrong feed is something a person notices by looking, the same way they'd
+// notice anything else on the card. The box is stored as FRACTIONS of the
+// reference image's width/height (not pixels) -- candidates are rarely all
+// the same resolution, and a fraction survives that; an absolute pixel box
+// would need translating per-candidate anyway, so the fraction is what
+// gets stored and what the server's crop (web.py's _watermark_crop) works
+// in directly via ffmpeg's iw/ih expressions.
+let WM_DRAG = null;   // {x0,y0} in DISPLAYED (CSS) pixels, while dragging
+let WM_BOX = null;    // {x,y,w,h} fractions, once a drag has completed
+function openWatermarkModal(){
+  const ch = DATA.channels.find(c=>c.key===current); if(!ch) return;
+  document.getElementById("wm-title").textContent = ch.title;
+  const img = document.getElementById("wm-img");
+  const nopic = document.getElementById("wm-nopic");
+  const wrap = document.getElementById("wm-imgwrap");
+  const boxEl = document.getElementById("wm-box");
+  const saveBtn = document.getElementById("wm-save");
+  document.getElementById("wm-result").className = "mresult";
+  boxEl.style.display = "none";
+  saveBtn.disabled = true;
+  WM_DRAG = null; WM_BOX = null;
+  // The best-ranked candidate WITH a captured frame -- not necessarily
+  // candidates[0], since an uncurated or freshly-added channel can have a
+  // top candidate that hasn't been probed yet at all.
+  const withFrame = (ch.candidates||[]).find(c => c.frame);
+  if(!withFrame){
+    img.removeAttribute("src"); wrap.style.display = "none";
+    nopic.style.display = "block";
+  }else{
+    wrap.style.display = "inline-block"; nopic.style.display = "none";
+    img.src = withFrame.frame;
+  }
+  document.getElementById("watermarkmodal").classList.add("on");
+}
+function wmImgRect(){
+  const img = document.getElementById("wm-img");
+  const r = img.getBoundingClientRect();
+  return {left:r.left, top:r.top, w:r.width, h:r.height};
+}
+function wmClamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+document.getElementById("wm-imgwrap").addEventListener("mousedown", (e) => {
+  const img = document.getElementById("wm-img");
+  if(!img.src) return;
+  const r = wmImgRect();
+  WM_DRAG = {x0: wmClamp(e.clientX - r.left, 0, r.w),
+            y0: wmClamp(e.clientY - r.top, 0, r.h)};
+  e.preventDefault();
+});
+document.addEventListener("mousemove", (e) => {
+  if(!WM_DRAG) return;
+  const r = wmImgRect();
+  const x1 = wmClamp(e.clientX - r.left, 0, r.w);
+  const y1 = wmClamp(e.clientY - r.top, 0, r.h);
+  const x = Math.min(WM_DRAG.x0, x1), y = Math.min(WM_DRAG.y0, y1);
+  const w = Math.abs(x1 - WM_DRAG.x0), h = Math.abs(y1 - WM_DRAG.y0);
+  const boxEl = document.getElementById("wm-box");
+  boxEl.style.display = "block";
+  boxEl.style.left = x+"px"; boxEl.style.top = y+"px";
+  boxEl.style.width = w+"px"; boxEl.style.height = h+"px";
+});
+document.addEventListener("mouseup", () => {
+  if(!WM_DRAG) return;
+  const boxEl = document.getElementById("wm-box");
+  const r = wmImgRect();
+  const img = document.getElementById("wm-img");
+  // Displayed (CSS) pixels -> fractions of the image's NATURAL size. The
+  // image is very likely displayed smaller than its captured resolution
+  // (max-width:100% in a modal), so this is not a no-op conversion.
+  const left = parseFloat(boxEl.style.left)||0, top = parseFloat(boxEl.style.top)||0;
+  const w = parseFloat(boxEl.style.width)||0, h = parseFloat(boxEl.style.height)||0;
+  WM_DRAG = null;
+  const MIN_PX = 8;   // smaller than this is almost certainly a stray click
+  if(w < MIN_PX || h < MIN_PX || !img.naturalWidth) { boxEl.style.display = "none"; return; }
+  WM_BOX = {
+    x: left / r.w, y: top / r.h,
+    w: w / r.w, h: h / r.h,
+  };
+  document.getElementById("wm-save").disabled = false;
+});
+document.getElementById("wm-save").addEventListener("click", () => {
+  if(!WM_BOX) return;
+  const s = SEL[current] = SEL[current] || {};
+  s.watermark_box = WM_BOX;
+  save();
+  document.getElementById("watermarkmodal").classList.remove("on");
+  renderList(); renderDetail();
+});
+function closeWatermarkModal(){
+  document.getElementById("watermarkmodal").classList.remove("on");
+}
+document.getElementById("wm-close").addEventListener("click", closeWatermarkModal);
+document.getElementById("wm-x").addEventListener("click", closeWatermarkModal);
 document.getElementById("em-sources").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-use]"); if(!btn) return;
   const src = btn.dataset.use;

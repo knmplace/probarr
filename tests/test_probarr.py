@@ -1427,6 +1427,99 @@ class TestEpgList(Temp):
         self.assertEqual(names, ["4Seven", "5Star"])
 
 
+class TestWatermarkCrop(Temp):
+    """A channel nobody has marked a watermark area for must trigger NO
+    work at all, not even a fast local one -- the whole point raised when
+    this was scoped. _watermark_crop() is the only place cropping ever
+    happens, so its 404-with-no-box behaviour IS the entire enforcement.
+    """
+
+    def _handler(self):
+        from probarr import web as web_mod
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        sent = []
+        h._send = lambda body, ctype="text/plain", code=200: sent.append(
+            (code, ctype, body))
+        h._file = lambda run_id, rest: sent.append(("FILE", rest)) or sent
+        return h, sent
+
+    def test_no_watermark_box_is_a_404_and_never_touches_the_frame(self):
+        from probarr.store import RunStore
+        import unittest.mock
+        store = RunStore(self.root, "run1")
+        store.write_selection({"BBCONE": {"group": "News"}})  # no watermark_box
+        h, sent = self._handler()
+        with unittest.mock.patch("probarr.web.subprocess") as fake_subprocess:
+            h._watermark_crop("run1", "BBCONE|s1")
+            fake_subprocess.run.assert_not_called()
+        self.assertEqual(sent[0][0], 404)
+
+    def test_missing_frame_file_is_a_404(self):
+        from probarr.store import RunStore
+        store = RunStore(self.root, "run1")
+        store.write_selection({"BBCONE": {"watermark_box":
+                               {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.1}}})
+        h, sent = self._handler()
+        # frame_path exists on disk for no candidate here -- 404, not a crash.
+        h._watermark_crop("run1", "BBCONE|s1")
+        self.assertEqual(sent[0][0], 404)
+
+    def test_crops_the_existing_frame_and_serves_the_result(self):
+        from probarr.store import RunStore
+        import unittest.mock
+        store = RunStore(self.root, "run1")
+        store.write_selection({"BBCONE": {"watermark_box":
+                               {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.1}}})
+        frame_path = store.frame_path("BBCONE|s1")
+        os.makedirs(os.path.dirname(frame_path), exist_ok=True)
+        with open(frame_path, "wb") as f:
+            f.write(b"not a real jpeg, ffmpeg is mocked")
+        h, sent = self._handler()
+        with unittest.mock.patch("probarr.web.subprocess") as fake_subprocess:
+            fake_subprocess.CalledProcessError = Exception
+            fake_subprocess.TimeoutExpired = Exception
+
+            def fake_run(cmd, **kw):
+                # Simulate ffmpeg actually writing the output file.
+                out_path = cmd[-1]
+                with open(out_path, "wb") as f:
+                    f.write(b"cropped")
+            fake_subprocess.run.side_effect = fake_run
+            h._watermark_crop("run1", "BBCONE|s1")
+            fake_subprocess.run.assert_called_once()
+        self.assertEqual(sent[0][0], "FILE")
+        self.assertEqual(sent[0][1][0], "watermarks")
+        self.assertTrue(sent[0][1][1].startswith(
+            RunStore.safe_name("BBCONE|s1")))
+
+    def test_redrawing_the_box_produces_a_different_cached_filename(self):
+        from probarr.store import RunStore
+        import unittest.mock
+        store = RunStore(self.root, "run1")
+        frame_path = store.frame_path("BBCONE|s1")
+        os.makedirs(os.path.dirname(frame_path), exist_ok=True)
+        with open(frame_path, "wb") as f:
+            f.write(b"x")
+
+        def crop_with(box):
+            store.write_selection({"BBCONE": {"watermark_box": box}})
+            h, sent = self._handler()
+            with unittest.mock.patch("probarr.web.subprocess") as fake_subprocess:
+                fake_subprocess.CalledProcessError = Exception
+                fake_subprocess.TimeoutExpired = Exception
+                def fake_run(cmd, **kw):
+                    with open(cmd[-1], "wb") as f:
+                        f.write(b"x")
+                fake_subprocess.run.side_effect = fake_run
+                h._watermark_crop("run1", "BBCONE|s1")
+            return sent[0][1][1]
+
+        name_a = crop_with({"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.1})
+        name_b = crop_with({"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.1})
+        self.assertNotEqual(name_a, name_b)
+
+
 class TestEpgSourceConsensus(Temp):
     """probarr never scored EPG matches against each other or read a
     guide's own <icon> at all -- both real gaps, not different approaches

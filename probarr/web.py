@@ -8,11 +8,13 @@ Deliberately stdlib http.server -- no framework, nothing to install, and the
 container needs no extra layer to run it.
 """
 import datetime
+import hashlib
 import html
 import json
 import time
 import os
 import posixpath
+import subprocess
 import tarfile
 import threading
 import urllib.parse
@@ -307,6 +309,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._file(run_id, parts[3:])
             if parts[2] == "thumbs":
                 return self._file(run_id, ["thumbs"] + parts[3:])
+            if parts[2] == "watermark":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                return self._watermark_crop(run_id, qs.get("key", [""])[0])
             if parts[2] == "results.json":
                 store = RunStore(self.root, run_id)
                 return self._send(json.dumps(store.load()), "application/json")
@@ -769,7 +774,8 @@ class Handler(BaseHTTPRequestHandler):
             for key, pick in (new_selection or {}).items():
                 pick = pick or {}
                 durable = {k: pick.get(k) for k in
-                          ("epg_source", "group", "confirmed", "settled_on")
+                          ("epg_source", "group", "confirmed", "settled_on",
+                           "watermark_box")
                           if pick.get(k)}
                 if durable:
                     lineups_mod.set_preference(self.root, lineup, key, **durable)
@@ -1965,6 +1971,62 @@ class Handler(BaseHTTPRequestHandler):
         self._send(json.dumps({"expected": expected, "sources": sources,
                               "winner": winner}),
                   "application/json")
+
+    def _watermark_crop(self, run_id, rec_key):
+        """The channel's marked watermark/logo area, cropped out of THIS
+        candidate's already-captured frame -- never a fresh probe. The
+        frame is already sitting on disk from whenever this candidate was
+        last probed; cropping a small region out of a local JPEG costs a
+        fraction of a second and touches the provider not at all.
+
+        Deliberately a hard 404 (not an empty/placeholder image) when the
+        channel has no marked area at all -- the whole point raised when
+        this was scoped: a channel nobody has marked must never trigger
+        any watermark work, not even a fast local one. This is the ONLY
+        place that work happens, so this check is the entire enforcement
+        of that.
+        """
+        store = RunStore(self.root, run_id)
+        channel_key = rec_key.split("|", 1)[0] if rec_key else ""
+        sel = (store.read_selection() or {}).get(channel_key) or {}
+        box = sel.get("watermark_box")
+        if not box:
+            return self._send('{"error":"no watermark area marked for this channel"}',
+                              "application/json", 404)
+        frame_path = store.frame_path(rec_key)
+        if not os.path.isfile(frame_path):
+            return self._send('{"error":"no captured frame for this candidate"}',
+                              "application/json", 404)
+        try:
+            x, y, w, h = (float(box["x"]), float(box["y"]),
+                         float(box["w"]), float(box["h"]))
+        except (KeyError, TypeError, ValueError):
+            return self._send('{"error":"malformed watermark area"}',
+                              "application/json", 500)
+        # The output filename bakes in a hash of the box -- redrawing the
+        # box naturally invalidates every previous crop without needing
+        # explicit cache-clearing logic, and an old crop from a previous
+        # box is simply an orphaned file from then on (same never-delete-
+        # just-stop-referencing pattern already used for stale custom
+        # streams elsewhere in this project).
+        box_hash = hashlib.sha256(
+            f"{x:.4f}:{y:.4f}:{w:.4f}:{h:.4f}".encode()).hexdigest()[:10]
+        out_dir = os.path.join(store.dir, "watermarks")
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"{RunStore.safe_name(rec_key)}-{box_hash}.jpg")
+        if not os.path.isfile(out_path):
+            ffmpeg = os.environ.get("PROBARR_FFMPEG", "ffmpeg")
+            crop_expr = f"crop=iw*{w}:ih*{h}:iw*{x}:ih*{y}"
+            try:
+                subprocess.run(
+                    [ffmpeg, "-y", "-i", frame_path, "-vf", crop_expr,
+                    "-frames:v", "1", "-q:v", "3", out_path],
+                    capture_output=True, timeout=15, check=True)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                    OSError) as e:
+                return self._send(json.dumps({"error": f"crop failed: {e}"}),
+                                  "application/json", 500)
+        return self._file(run_id, ["watermarks", os.path.basename(out_path)])
 
     def _epg_search(self, run_id, source_name, query):
         """One saved EPG source's channel names matching `query`, live --
@@ -3580,7 +3642,7 @@ class Handler(BaseHTTPRequestHandler):
         # Resolve inside the run directory and refuse anything that escapes it
         # -- the run id and filename both arrive from the URL.
         store = RunStore(self.root, run_id)
-        if not rest or rest[0] not in ("thumbs", "frames", "crops", "clips"):
+        if not rest or rest[0] not in ("thumbs", "frames", "crops", "clips", "watermarks"):
             return self._send("forbidden", "text/plain", code=403)
         name = posixpath.normpath("/".join(rest)).lstrip("/")
         base = os.path.realpath(store.dir)
