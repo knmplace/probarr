@@ -1606,6 +1606,124 @@ class TestEpgList(Temp):
         self.assertEqual(names, ["4Seven", "5Star"])
 
 
+class TestEpgCacheStampede(Temp):
+    """KNM fix (probarr-vz7): concurrent callers for the same EPG source URL
+    used to each independently re-download/re-parse the guide -- confirmed
+    live via py-spy as six threads simultaneously inside ElementTree
+    parsing, pegging the container at 100%+ CPU. load_cached() and
+    _indexed_guide() now serialize per-url so only the first caller does the
+    real work and the rest reuse it. These tests prove that directly: spin
+    up N concurrent callers for the same url and assert the expensive work
+    (Guide.load) ran once, not N times.
+    """
+
+    def _guide_xml(self):
+        # A plain filesystem path, not a file:// URL -- Guide.load/_open
+        # accepts either, and file:// URLs don't round-trip through
+        # url2pathname on Windows (a separate, pre-existing, unrelated bug).
+        xml = os.path.join(self.root, "guide.xml")
+        with open(xml, "w", encoding="utf-8") as f:
+            f.write('<?xml version="1.0"?><tv>'
+                    '<channel id="c1"><display-name>BBC One</display-name></channel>'
+                    '</tv>')
+        return xml
+
+    def test_concurrent_load_cached_calls_parse_the_guide_only_once(self):
+        import threading
+        from probarr import epgcheck
+
+        epgcheck._cache.clear()
+        epgcheck._locks.clear()
+        url = self._guide_xml()
+
+        real_load = epgcheck.Guide.load
+        call_count = []
+        start_gate = threading.Event()
+
+        def slow_load(*args, **kwargs):
+            # Force real overlap: every thread reaches this before any of
+            # them returns, so a missing lock would show up as call_count > 1.
+            call_count.append(1)
+            start_gate.wait(timeout=5)
+            return real_load(*args, **kwargs)
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                results.append(epgcheck.load_cached(url, root=None))
+            except Exception as e:
+                errors.append(e)
+
+        with unittest.mock.patch.object(epgcheck.Guide, "load", side_effect=slow_load):
+            threads = [threading.Thread(target=worker) for _ in range(6)]
+            for t in threads:
+                t.start()
+            # Give every thread a chance to reach the lock before releasing
+            # the first one through the parse -- proves they actually
+            # serialized rather than just happening to run in order.
+            import time as _time
+            _time.sleep(0.2)
+            start_gate.set()
+            for t in threads:
+                t.join(timeout=5)
+
+        self.assertEqual(len(errors), 0, errors)
+        self.assertEqual(len(results), 6)
+        self.assertEqual(call_count, [1],
+                          "Guide.load should run exactly once for 6 concurrent "
+                          "callers of the same url -- the rest must reuse the "
+                          "cached result instead of each re-parsing")
+        # All 6 threads got back the same Guide instance from the cache.
+        self.assertTrue(all(g is results[0] for g in results))
+
+    def test_concurrent_indexed_guide_calls_build_the_index_only_once(self):
+        import threading
+        from probarr import epgcheck
+        from probarr.normalize import Normalizer
+
+        epgcheck._cache.clear()
+        epgcheck._locks.clear()
+        epgcheck._indexed.clear()
+        url = self._guide_xml()
+        normalizer = Normalizer()
+
+        real_build = epgcheck.Guide.build_name_index
+        call_count = []
+        start_gate = threading.Event()
+
+        def slow_build(self_guide, *args, **kwargs):
+            call_count.append(1)
+            start_gate.wait(timeout=5)
+            return real_build(self_guide, *args, **kwargs)
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                results.append(epgcheck._indexed_guide(url, normalizer, None))
+            except Exception as e:
+                errors.append(e)
+
+        with unittest.mock.patch.object(epgcheck.Guide, "build_name_index", slow_build):
+            threads = [threading.Thread(target=worker) for _ in range(6)]
+            for t in threads:
+                t.start()
+            import time as _time
+            _time.sleep(0.2)
+            start_gate.set()
+            for t in threads:
+                t.join(timeout=5)
+
+        self.assertEqual(len(errors), 0, errors)
+        self.assertEqual(len(results), 6)
+        self.assertEqual(call_count, [1],
+                          "build_name_index should run exactly once for 6 "
+                          "concurrent callers of the same url")
+
+
 class TestExpectedNowHonoursExplicitEpgSource(Temp):
     """Real bug report: after explicitly picking a different EPG source for
     a channel in Check EPG, diagnosing that channel still captured the OLD
