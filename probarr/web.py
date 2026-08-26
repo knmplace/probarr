@@ -3759,6 +3759,14 @@ def serve(root, host="0.0.0.0", port=7799):
     if restored:
         print(f"resumed {restored} probe(s) left over from the last run",
               flush=True)
+    # Every restart -- every deploy -- starts with a stone-cold EPG cache,
+    # and the FIRST person to open Curate paid for that live through the
+    # page's own persistent EPG badge (~19s across four real saved
+    # sources, confirmed). Warming it here means that cost lands on an
+    # idle container instead of the next person's page load.
+    threading.Thread(target=epgcheck_mod.prewarm_all_sources,
+                     args=(Handler.root, Normalizer(aliases=aliases_mod.read(Handler.root))),
+                     daemon=True).start()
     print(f"probarr web UI on http://{host}:{port} (data: {Handler.root})", flush=True)
     try:
         httpd.serve_forever()

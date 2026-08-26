@@ -8,9 +8,11 @@ CLI or silently reimplementing (and inevitably drifting from) its behaviour.
 """
 import os
 import shutil
+import threading
 import time
 
 from . import __version__
+from . import epgcheck as epgcheck_mod
 from . import lineups as lineups_mod
 from . import settings as settings_mod
 from . import wantlist as wantlist_mod
@@ -295,4 +297,13 @@ def _run(store, root, source, wantlist, epg, regions, strict_region, region_tags
     if not meta.get("interrupted"):
         updates["full_completed"] = now
     store.write_meta({**meta, **updates})
+    # A completed run is exactly the moment Curate's own EPG cache is most
+    # likely to be cold -- a real run routinely outlasts the cache's TTL,
+    # so the person who just finished waiting for the run would otherwise
+    # immediately hit another ~19s wait opening the result. Backgrounded:
+    # this must not delay the run's own completion, and a failure here is
+    # not a run failure (see prewarm_all_sources()'s own best-effort
+    # handling of individual sources).
+    threading.Thread(target=epgcheck_mod.prewarm_all_sources,
+                     args=(root, norm), daemon=True).start()
     return store, by_channel

@@ -98,8 +98,17 @@ def _display_clean(name):
 # hours, not seconds -- caching each parsed Guide keeps a "check every
 # channel against every source" pass from re-fetching and re-parsing a
 # multi-MB file (seconds each, see runner.py's own EPG load) on every single
-# click. 10 minutes balances staying current against that repeated cost.
-_CACHE_TTL = 600
+# click. Raised from 10 minutes: a real Verify run against a real lineup
+# routinely takes longer than that, so by the time it finished, Curate's
+# own persistent EPG badge (loadEpgNow(), fired automatically for the
+# first channel on every page load) paid the full cold-parse cost anyway
+# -- confirmed live, ~19s across four real saved sources, on a page whose
+# own HTML/data load in milliseconds. 30 minutes is still comfortably
+# inside "the guide might have changed" territory (see the note above,
+# hours not seconds) while covering the actual gap between normal visits.
+# See prewarm_all_sources() below for the other half of the fix -- this
+# alone does not help a genuinely cold cache right after a restart.
+_CACHE_TTL = 1800
 _cache = {}  # url -> (Guide, loaded_at)
 
 # How long a downloaded XMLTV file is reused from disk. Deliberately hours,
@@ -186,6 +195,28 @@ def _indexed_guide(url, normalizer, root):
     g.build_name_index(normalizer)
     _indexed[url] = (sig, g)
     return g
+
+
+def prewarm_all_sources(root, normalizer):
+    """Parse and index every saved EPG source once, so the FIRST real
+    check_all() call after this (whoever makes it, whatever channel) hits a
+    warm cache instead of paying the ~5-20s-per-source cold parse live.
+
+    Meant to be called from a background thread at the two moments that
+    actually leave the cache cold: server startup, and the end of a
+    completed Verify run (see web.py's serve() and runner.py's _run()) --
+    a run routinely outlasts _CACHE_TTL, so without this, the very next
+    person to open Curate paid for it synchronously through the page's own
+    persistent EPG badge. Best-effort throughout: one source failing to
+    parse (network hiccup, a rate-limited aggregator) must not stop the
+    others from warming, and this must never raise into whatever caller
+    triggered it.
+    """
+    for src in epgsources_mod.list_all(root):
+        try:
+            _indexed_guide(src["url"], normalizer, root)
+        except Exception:
+            pass
 
 
 def search_source(root, source_name, query, normalizer, limit=25):

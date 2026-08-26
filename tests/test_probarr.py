@@ -1531,6 +1531,28 @@ class TestEpgSourceConsensus(Temp):
         handler = web_mod.Handler.__new__(web_mod.Handler)
         self.assertEqual(handler._epg_fallback_logo("Totally Unmatched Channel", ""), "")
 
+    def test_prewarm_indexes_every_saved_source_so_the_next_check_is_fast(self):
+        # Real incident this exists for: Curate's persistent EPG badge
+        # fires automatically for the first channel on every page load,
+        # and the in-memory guide cache does not survive a run (which
+        # routinely outlasts its TTL) or a restart (cold by definition).
+        # prewarm_all_sources() is meant to pay that cost ahead of time,
+        # in the background, at exactly those two moments.
+        from probarr import epgcheck
+        self._guide("src-a", [("1", "BBC Two Lon", None)])
+        self._guide("src-b", [("2", "BBC Two North", None)])
+        epgcheck._cache.clear()
+        epgcheck._indexed.clear()
+        epgcheck.prewarm_all_sources(self.root, Normalizer())
+        self.assertEqual(len(epgcheck._cache), 2)
+        self.assertEqual(len(epgcheck._indexed), 2)
+
+    def test_prewarm_is_best_effort_and_never_raises_on_a_bad_source(self):
+        from probarr import epgcheck
+        from probarr import epgsources
+        epgsources.save(self.root, "broken", "file:///no/such/file.xml")
+        epgcheck.prewarm_all_sources(self.root, Normalizer())  # must not raise
+
 
 class TestEpgConsensus(Temp):
     def _guide(self, channels):
