@@ -149,6 +149,28 @@ class Dispatcharr:
     def channels(self):
         return self.paged("/api/channels/channels/")
 
+    def active_lineup(self):
+        """The operator's actual curated channel list, with real category names.
+
+        channels() returns Dispatcharr's assigned/active lineup already --
+        this just resolves each channel's bare `channel_group_id` against
+        groups() so callers get a human name ("Movies", "24/7") instead of
+        an opaque id, which is what Browse Channels' category filter needs.
+        A Dispatcharr instance can carry thousands of groups from raw M3U
+        ingestion that were never assigned to any channel; only ones actually
+        referenced here are relevant, so no attempt is made to return the
+        rest.
+        """
+        names = {g["id"]: g.get("name") or "" for g in self.groups()}
+        out = []
+        for c in self.channels():
+            out.append({
+                "id": c["id"], "name": c.get("name") or "",
+                "group": names.get(c.get("channel_group_id"), ""),
+                "tvg_id": c.get("tvg_id") or "",
+            })
+        return out
+
     def active_streams(self):
         """What Dispatcharr is serving to a viewer RIGHT NOW.
 

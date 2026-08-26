@@ -1377,6 +1377,79 @@ class TestRunExportUsesTheSourceProviderSpec(Temp):
             "https://p.tv/m3u?u=x&p=y", "mybunny", log=unittest.mock.ANY)
 
 
+class TestBrowseDispatcharrActiveLineup(Temp):
+    """probarr-oz2: Browse Channels for a dispatcharr:// provider used to
+    always show every raw stream Dispatcharr has ever ingested from any M3U
+    account (tens of thousands on a real instance) instead of the operator's
+    actual curated lineup. `active_only` opts into the curated view -- one
+    row per Dispatcharr channel, with its real category as `group` -- and is
+    silently ignored for any non-dispatcharr provider.
+    """
+
+    def _handler(self):
+        from probarr import web as web_mod
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        return h, web_mod
+
+    def test_active_only_uses_curated_lineup_not_raw_streams(self):
+        providers.save(self.root, "mydispatch", "dispatcharr://u:p@host:9191")
+        handler, web_mod = self._handler()
+
+        fake_client = unittest.mock.MagicMock()
+        fake_client.active_lineup.return_value = [
+            {"id": 1, "name": "Beyond Paradise", "group": "Niko TV", "tvg_id": ""},
+            {"id": 2, "name": "24/7 Eureka", "group": "24/7", "tvg_id": ""},
+        ]
+
+        with unittest.mock.patch.object(web_mod, "client_from_spec",
+                                        return_value=fake_client), \
+             unittest.mock.patch.object(web_mod, "load_source") as fake_load, \
+             unittest.mock.patch.object(handler, "_send") as fake_send:
+            handler._browse({"provider": "mydispatch", "active_only": True})
+
+        fake_load.assert_not_called()
+        fake_client.active_lineup.assert_called_once()
+        body = json.loads(fake_send.call_args[0][0])
+        self.assertEqual(len(body["channels"]), 2)
+        self.assertEqual(body["total_streams"], 2)
+        self.assertEqual(sorted(body["groups"]), ["24/7", "Niko TV"])
+        names = {c["name"]: c["group"] for c in body["channels"]}
+        self.assertEqual(names["Beyond Paradise"], "Niko TV")
+
+    def test_active_only_ignored_for_non_dispatcharr_provider(self):
+        providers.save(self.root, "mybunny", "https://p.tv/m3u?u=x&p=y")
+        handler, web_mod = self._handler()
+
+        from probarr.sources.base import Stream
+        streams = [Stream(id="1", name="BBC One", url="http://x/1", group="",
+                          logo="", tvg_id="", source="mybunny", attrs={})]
+
+        with unittest.mock.patch.object(web_mod, "load_source",
+                                        return_value=streams) as fake_load, \
+             unittest.mock.patch.object(web_mod, "client_from_spec") as fake_client_from_spec, \
+             unittest.mock.patch.object(handler, "_send") as fake_send:
+            handler._browse({"provider": "mybunny", "active_only": True})
+
+        fake_load.assert_called_once()
+        fake_client_from_spec.assert_not_called()
+        body = json.loads(fake_send.call_args[0][0])
+        self.assertEqual(body["total_streams"], 1)
+
+    def test_dispatcharr_error_surfaces_as_502(self):
+        providers.save(self.root, "mydispatch", "dispatcharr://u:p@host:9191")
+        handler, web_mod = self._handler()
+
+        with unittest.mock.patch.object(web_mod, "client_from_spec",
+                                        side_effect=RuntimeError("unreachable")), \
+             unittest.mock.patch.object(handler, "_send") as fake_send:
+            handler._browse({"provider": "mydispatch", "active_only": True})
+
+        args, kwargs = fake_send.call_args
+        status = args[2] if len(args) > 2 else kwargs.get("status")
+        self.assertEqual(status, 502)
+
+
 class TestReferenceLineups(Temp):
     def _fake_response(self, payload):
         body = json.dumps(payload).encode()

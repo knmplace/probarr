@@ -2222,6 +2222,11 @@ class Handler(BaseHTTPRequestHandler):
         regions = [r.strip().upper() for r in regions.split(",") if r.strip()] \
             if isinstance(regions, str) and regions.strip() else None
 
+        active_only = bool(body.get("active_only")) and prov["scheme"] == "dispatcharr"
+
+        if active_only:
+            return self._browse_dispatcharr_active(prov)
+
         try:
             streams = load_source(prov["spec"])
         except Exception as e:
@@ -2243,6 +2248,36 @@ class Handler(BaseHTTPRequestHandler):
         channels.sort(key=lambda c: c["name"].lower())
 
         self._send(json.dumps({"channels": channels, "total_streams": len(streams)}),
+                   "application/json")
+
+    def _browse_dispatcharr_active(self, prov):
+        """Browse's Dispatcharr-only path: the curated active lineup, not
+        every raw stream Dispatcharr has ever ingested from any M3U account.
+
+        A Dispatcharr instance commonly carries tens of thousands of raw
+        provider streams but only a couple hundred actually assigned to
+        channels an operator watches -- the rest is ingestion noise from
+        every M3U account it has ever pointed at, most of it irrelevant to
+        "what do I want in my wantlist". This mirrors that curated view
+        instead, one row per channel (no text-grouping needed -- Dispatcharr
+        already did that), with the channel's real category as `group` so
+        the UI can offer it as a filter.
+        """
+        try:
+            client = client_from_spec(prov["spec"])
+            lineup = client.active_lineup()
+        except Exception as e:
+            return self._send(json.dumps({"error": str(e)[:400]}),
+                              "application/json", 502)
+
+        channels = [{"key": "dispatcharr:%s" % c["id"], "name": c["name"],
+                     "count": 1, "examples": [c["name"]], "group": c["group"]}
+                    for c in lineup]
+        channels.sort(key=lambda c: c["name"].lower())
+        groups = sorted({c["group"] for c in channels if c["group"]})
+
+        self._send(json.dumps({"channels": channels, "total_streams": len(lineup),
+                               "groups": groups}),
                    "application/json")
 
     def _start_run(self, body):
