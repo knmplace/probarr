@@ -13,6 +13,13 @@ So it is set once, by the person who knows the answer, and everything obeys it.
 import json
 import os
 
+from . import providers as providers_mod
+
+# Fields whose value is (or may contain) a live provider credential --
+# e.g. a "source" of xtream://user:pass@host:port. Never sent to an HTTP
+# client unredacted; see redact() below and its use in web.py's GET handler.
+SECRET_KEYS = ("source", "epg")
+
 DEFAULTS = {
     "concurrency": 1,
     "gap_seconds": 0.4,
@@ -111,6 +118,21 @@ def coerce(values):
     v = out.get("push_prune", True)
     out["push_prune"] = (v.lower() not in ("false", "0", "no", "")
                          if isinstance(v, str) else bool(v))
+    return out
+
+
+def redact(values):
+    """Copy of `values` safe to hand to an HTTP client.
+
+    `source`/`epg` may be a provider URL with embedded credentials (e.g.
+    xtream://user:pass@host:port) -- reuses providers.redact(), the same
+    masking already trusted for /api/providers, so a caller can't observe
+    the raw secret just by hitting GET /api/settings instead.
+    """
+    out = dict(values)
+    for k in SECRET_KEYS:
+        if out.get(k):
+            out[k] = providers_mod.redact(out[k])
     return out
 
 

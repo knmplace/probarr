@@ -11,6 +11,7 @@ actually shipped more than once.
 """
 import json
 import os
+import pathlib
 import re
 import shutil
 import sys
@@ -21,7 +22,7 @@ import unittest.mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from probarr import aliases as aliases_mod
-from probarr import curate, lineups, pages, providers, wantlist as wl
+from probarr import curate, lineups, pages, providers, settings, wantlist as wl
 from probarr.normalize import Normalizer, group_candidates, declared_quality_rank
 from probarr.rank import rank
 from probarr.sources import m3u
@@ -1573,7 +1574,10 @@ class TestEpgList(Temp):
         with open(xml, "w", encoding="utf-8") as f:
             f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
         from probarr import epgsources
-        epgsources.save(self.root, "test-guide", "file://" + xml)
+        # KNM fix (probarr-9wl): pathlib.as_uri(), not string concat --
+        # "file://" + xml is malformed on Windows (file://B:\...) and
+        # fails in urlopen; as_uri() produces a real file:///B:/... URL.
+        epgsources.save(self.root, "test-guide", pathlib.Path(xml).as_uri())
 
     def test_collapses_sd_hd_pairs_to_one_row(self):
         from probarr import epgcheck
@@ -1606,6 +1610,124 @@ class TestEpgList(Temp):
         self.assertEqual(names, ["4Seven", "5Star"])
 
 
+class TestEpgCacheStampede(Temp):
+    """KNM fix (probarr-vz7): concurrent callers for the same EPG source URL
+    used to each independently re-download/re-parse the guide -- confirmed
+    live via py-spy as six threads simultaneously inside ElementTree
+    parsing, pegging the container at 100%+ CPU. load_cached() and
+    _indexed_guide() now serialize per-url so only the first caller does the
+    real work and the rest reuse it. These tests prove that directly: spin
+    up N concurrent callers for the same url and assert the expensive work
+    (Guide.load) ran once, not N times.
+    """
+
+    def _guide_xml(self):
+        # A plain filesystem path, not a file:// URL -- Guide.load/_open
+        # accepts either, and file:// URLs don't round-trip through
+        # url2pathname on Windows (a separate, pre-existing, unrelated bug).
+        xml = os.path.join(self.root, "guide.xml")
+        with open(xml, "w", encoding="utf-8") as f:
+            f.write('<?xml version="1.0"?><tv>'
+                    '<channel id="c1"><display-name>BBC One</display-name></channel>'
+                    '</tv>')
+        return xml
+
+    def test_concurrent_load_cached_calls_parse_the_guide_only_once(self):
+        import threading
+        from probarr import epgcheck
+
+        epgcheck._cache.clear()
+        epgcheck._locks.clear()
+        url = self._guide_xml()
+
+        real_load = epgcheck.Guide.load
+        call_count = []
+        start_gate = threading.Event()
+
+        def slow_load(*args, **kwargs):
+            # Force real overlap: every thread reaches this before any of
+            # them returns, so a missing lock would show up as call_count > 1.
+            call_count.append(1)
+            start_gate.wait(timeout=5)
+            return real_load(*args, **kwargs)
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                results.append(epgcheck.load_cached(url, root=None))
+            except Exception as e:
+                errors.append(e)
+
+        with unittest.mock.patch.object(epgcheck.Guide, "load", side_effect=slow_load):
+            threads = [threading.Thread(target=worker) for _ in range(6)]
+            for t in threads:
+                t.start()
+            # Give every thread a chance to reach the lock before releasing
+            # the first one through the parse -- proves they actually
+            # serialized rather than just happening to run in order.
+            import time as _time
+            _time.sleep(0.2)
+            start_gate.set()
+            for t in threads:
+                t.join(timeout=5)
+
+        self.assertEqual(len(errors), 0, errors)
+        self.assertEqual(len(results), 6)
+        self.assertEqual(call_count, [1],
+                          "Guide.load should run exactly once for 6 concurrent "
+                          "callers of the same url -- the rest must reuse the "
+                          "cached result instead of each re-parsing")
+        # All 6 threads got back the same Guide instance from the cache.
+        self.assertTrue(all(g is results[0] for g in results))
+
+    def test_concurrent_indexed_guide_calls_build_the_index_only_once(self):
+        import threading
+        from probarr import epgcheck
+        from probarr.normalize import Normalizer
+
+        epgcheck._cache.clear()
+        epgcheck._locks.clear()
+        epgcheck._indexed.clear()
+        url = self._guide_xml()
+        normalizer = Normalizer()
+
+        real_build = epgcheck.Guide.build_name_index
+        call_count = []
+        start_gate = threading.Event()
+
+        def slow_build(self_guide, *args, **kwargs):
+            call_count.append(1)
+            start_gate.wait(timeout=5)
+            return real_build(self_guide, *args, **kwargs)
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                results.append(epgcheck._indexed_guide(url, normalizer, None))
+            except Exception as e:
+                errors.append(e)
+
+        with unittest.mock.patch.object(epgcheck.Guide, "build_name_index", slow_build):
+            threads = [threading.Thread(target=worker) for _ in range(6)]
+            for t in threads:
+                t.start()
+            import time as _time
+            _time.sleep(0.2)
+            start_gate.set()
+            for t in threads:
+                t.join(timeout=5)
+
+        self.assertEqual(len(errors), 0, errors)
+        self.assertEqual(len(results), 6)
+        self.assertEqual(call_count, [1],
+                          "build_name_index should run exactly once for 6 "
+                          "concurrent callers of the same url")
+
+
 class TestExpectedNowHonoursExplicitEpgSource(Temp):
     """Real bug report: after explicitly picking a different EPG source for
     a channel in Check EPG, diagnosing that channel still captured the OLD
@@ -1629,7 +1751,10 @@ class TestExpectedNowHonoursExplicitEpgSource(Temp):
         with open(xml, "w", encoding="utf-8") as f:
             f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
         from probarr import epgsources
-        epgsources.save(self.root, name, "file://" + xml)
+        # KNM fix (probarr-9wl): pathlib.as_uri(), not string concat --
+        # "file://" + xml is malformed on Windows (file://B:\...) and
+        # fails in urlopen; as_uri() produces a real file:///B:/... URL.
+        epgsources.save(self.root, name, pathlib.Path(xml).as_uri())
 
     def _record(self):
         return {"channel_key": "NATGEO", "stream_name": "National Geographic",
@@ -1829,7 +1954,10 @@ class TestEpgSourceConsensus(Temp):
         with open(xml, "w", encoding="utf-8") as f:
             f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
         from probarr import epgsources
-        epgsources.save(self.root, name, "file://" + xml)
+        # KNM fix (probarr-9wl): pathlib.as_uri(), not string concat --
+        # "file://" + xml is malformed on Windows (file://B:\...) and
+        # fails in urlopen; as_uri() produces a real file:///B:/... URL.
+        epgsources.save(self.root, name, pathlib.Path(xml).as_uri())
 
     def test_word_set_ignores_punctuation_and_case(self):
         from probarr.epgcheck import _word_set
@@ -1945,7 +2073,10 @@ class TestEpgConsensus(Temp):
         with open(xml, "w", encoding="utf-8") as f:
             f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
         from probarr import epgsources
-        epgsources.save(self.root, "test-guide", "file://" + xml)
+        # KNM fix (probarr-9wl): pathlib.as_uri(), not string concat --
+        # "file://" + xml is malformed on Windows (file://B:\...) and
+        # fails in urlopen; as_uri() produces a real file:///B:/... URL.
+        epgsources.save(self.root, "test-guide", pathlib.Path(xml).as_uri())
 
     def test_display_clean_leaves_ordinary_names_alone(self):
         from probarr import epgcheck
@@ -2050,6 +2181,23 @@ class TestCredentials(Temp):
                 ("xtream://user:pw123@panel.tv", "pw123")]:  # probarr:allow-secret
             self.assertNotIn(secret, providers.redact(spec))
 
+    def test_settings_redact_hides_source_and_epg_credentials(self):
+        # GET /api/settings must never hand back what write() actually
+        # stored -- source/epg may be an xtream://user:pass@host spec.
+        secret = "hunter2"  # probarr:allow-secret
+        values = settings.write(self.root, {
+            "source": "xtream://bob:" + secret + "@panel.tv"})  # probarr:allow-secret
+        redacted = settings.redact(values)
+        self.assertNotIn(secret, json.dumps(redacted))
+        # And the real value must still be recoverable server-side --
+        # redact() must not have mutated storage, only the returned copy.
+        self.assertIn(secret, settings.read(self.root)["source"])
+
+    def test_settings_redact_leaves_non_secret_fields_untouched(self):
+        values = settings.write(self.root, {"concurrency": 3})
+        redacted = settings.redact(values)
+        self.assertEqual(redacted["concurrency"], 3)
+
 
 class TestPageTemplates(unittest.TestCase):
     """The bug class that broke the Curate page twice: JavaScript written
@@ -2071,8 +2219,12 @@ class TestPageTemplates(unittest.TestCase):
         # unrelated Delete button's listener in the same block). Scanning
         # web.py here too is what would have caught it before it shipped.
         for path in ("probarr/curate.py", "probarr/pages.py", "probarr/web.py"):
+            # KNM fix (probarr-vyx): explicit encoding, not the platform
+            # default -- on Windows that's cp1252, and web.py contains a
+            # byte that isn't valid cp1252, erroring the test outright.
             with open(os.path.join(os.path.dirname(
-                    os.path.dirname(os.path.abspath(__file__))), path)) as f:
+                    os.path.dirname(os.path.abspath(__file__))), path),
+                    encoding="utf-8") as f:
                 src = f.read()
             for m in re.finditer(r'^([A-Z_]+) = (r?)"""<!doctype', src, re.M):
                 self.assertEqual(m.group(2), "r",
@@ -2567,7 +2719,10 @@ class TestCodeReviewFixes(Temp):
                    f'<display-name>{channel_name}</display-name></channel>'
                    f'{prog}</tv>')
         from probarr import epgsources
-        epgsources.save(self.root, name, "file://" + xml)
+        # KNM fix (probarr-9wl): pathlib.as_uri(), not string concat --
+        # "file://" + xml is malformed on Windows (file://B:\...) and
+        # fails in urlopen; as_uri() produces a real file:///B:/... URL.
+        epgsources.save(self.root, name, pathlib.Path(xml).as_uri())
 
     def test_a_pinned_source_with_a_schedule_gap_does_not_fall_through(self):
         from probarr import web as web_mod
