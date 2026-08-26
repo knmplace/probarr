@@ -729,17 +729,31 @@ function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"
 
 // --- persistence -------------------------------------------------------
 let saveTimer=null;
+// Returns a promise resolving once the debounced write has actually
+// reached the server -- every existing caller ignores it (fire-and-forget,
+// unchanged behaviour), but a caller that immediately depends on the save
+// having landed (e.g. re-rendering something that fetches FROM the just-
+// saved state) can await it instead of racing ahead of it. Real bug this
+// fixes: saving a watermark_box and re-rendering candidate cards straight
+// after used to request each crop before the debounced save had actually
+// written the box server-side, so the crop endpoint correctly 404'd
+// (nothing to crop yet), got marked empty, and stayed that way until an
+// unrelated full page reload happened to re-render after the save had
+// caught up.
 function save(){
   document.getElementById("saveind").textContent="saving\u2026";
   clearTimeout(saveTimer);
-  saveTimer=setTimeout(async ()=>{
-    try{
-      await fetch("/api/run/"+encodeURIComponent(DATA.run_id)+"/selection",
-        {method:"POST",headers:{"Content-Type":"application/json"},
-         body:JSON.stringify(SEL)});
-      document.getElementById("saveind").textContent="saved";
-    }catch(e){ document.getElementById("saveind").textContent="save failed"; }
-  },400);
+  return new Promise(resolve => {
+    saveTimer=setTimeout(async ()=>{
+      try{
+        await fetch("/api/run/"+encodeURIComponent(DATA.run_id)+"/selection",
+          {method:"POST",headers:{"Content-Type":"application/json"},
+           body:JSON.stringify(SEL)});
+        document.getElementById("saveind").textContent="saved";
+      }catch(e){ document.getElementById("saveind").textContent="save failed"; }
+      resolve();
+    },400);
+  });
 }
 
 // --- channel state -----------------------------------------------------
@@ -2595,12 +2609,15 @@ document.addEventListener("mouseup", () => {
   };
   document.getElementById("wm-save").disabled = false;
 });
-document.getElementById("wm-save").addEventListener("click", () => {
+document.getElementById("wm-save").addEventListener("click", async () => {
   if(!WM_BOX) return;
   const s = SEL[current] = SEL[current] || {};
   s.watermark_box = WM_BOX;
-  save();
   document.getElementById("watermarkmodal").classList.remove("on");
+  // Wait for the box to actually be written server-side before rendering
+  // the candidate cards that will immediately request crops OF it -- see
+  // save()'s own comment for the real race this closes.
+  await save();
   renderList(); renderDetail();
 });
 function closeWatermarkModal(){
