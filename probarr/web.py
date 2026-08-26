@@ -158,7 +158,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/settings":
             return self._send(pages.settings_page())
         if path == "/api/settings":
-            return self._send(json.dumps(settings_mod.read(self.root)),
+            # source/epg may hold live provider credentials (e.g.
+            # xtream://user:pass@host:port); redact before this leaves the
+            # process, same reasoning as /api/providers below.
+            return self._send(json.dumps(settings_mod.redact(settings_mod.read(self.root))),
                               "application/json")
         if path == "/lineups":
             return self._send(pages.lineups_page())

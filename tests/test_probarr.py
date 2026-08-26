@@ -21,7 +21,7 @@ import unittest.mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from probarr import aliases as aliases_mod
-from probarr import curate, lineups, pages, providers, wantlist as wl
+from probarr import curate, lineups, pages, providers, settings, wantlist as wl
 from probarr.normalize import Normalizer, group_candidates, declared_quality_rank
 from probarr.rank import rank
 from probarr.sources import m3u
@@ -1644,6 +1644,23 @@ class TestCredentials(Temp):
                 ("dispatcharr://admin:s3cret@10.0.0.1:9191", "s3cret"),  # probarr:allow-secret
                 ("xtream://user:pw123@panel.tv", "pw123")]:  # probarr:allow-secret
             self.assertNotIn(secret, providers.redact(spec))
+
+    def test_settings_redact_hides_source_and_epg_credentials(self):
+        # GET /api/settings must never hand back what write() actually
+        # stored -- source/epg may be an xtream://user:pass@host spec.
+        secret = "hunter2"  # probarr:allow-secret
+        values = settings.write(self.root, {
+            "source": "xtream://bob:" + secret + "@panel.tv"})  # probarr:allow-secret
+        redacted = settings.redact(values)
+        self.assertNotIn(secret, json.dumps(redacted))
+        # And the real value must still be recoverable server-side --
+        # redact() must not have mutated storage, only the returned copy.
+        self.assertIn(secret, settings.read(self.root)["source"])
+
+    def test_settings_redact_leaves_non_secret_fields_untouched(self):
+        values = settings.write(self.root, {"concurrency": 3})
+        redacted = settings.redact(values)
+        self.assertEqual(redacted["concurrency"], 3)
 
 
 class TestPageTemplates(unittest.TestCase):
