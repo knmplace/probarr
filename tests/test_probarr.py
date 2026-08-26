@@ -2860,5 +2860,53 @@ class TestGetOrCreateLogoDoesNotRescan(unittest.TestCase):
         self.assertEqual(c.get_or_create_logo("BBC One", "http://l/1.png"), 5)
 
 
+class TestSettingsPostIsAlsoRedacted(Temp):
+    """PR #1 redacted GET /api/settings but not the POST response, so the
+    save round-trip still handed the raw credential back -- into the
+    response body, into any proxy log on that leg, and into the settings
+    field on screen until the next reload. The GET fix is only half of it
+    unless both directions agree.
+    """
+
+    def _handler(self):
+        from probarr import web as web_mod
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        sent = []
+        h._send = lambda body, ctype="text/plain", code=200: sent.append(body)
+        h._json_body = lambda: (
+            {"source": "xtream://user:sup3rs3cret@host:8080"}, False)
+        h.path = "/api/settings"
+        return h, sent
+
+    def test_the_save_response_does_not_echo_the_raw_credential(self):
+        import json as _json
+        h, sent = self._handler()
+        h.do_POST()
+        body = _json.loads(sent[0])
+        self.assertNotIn("sup3rs3cret", sent[0])
+        self.assertEqual(body["source"], "xtream://***:***@host:8080")
+
+    def test_the_real_credential_is_still_what_gets_stored(self):
+        from probarr import settings as settings_mod
+        h, _ = self._handler()
+        h.do_POST()
+        # Redaction is a display concern only -- the stored value must
+        # remain usable, or the next run cannot reach the provider.
+        self.assertEqual(settings_mod.read(self.root)["source"],
+                         "xtream://user:sup3rs3cret@host:8080")
+
+    def test_get_and_post_agree_on_what_they_show(self):
+        import json as _json
+        h, sent = self._handler()
+        h.do_POST()
+        post_body = _json.loads(sent[0])
+        h2, sent2 = self._handler()
+        h2.path = "/api/settings"
+        h2.do_GET()
+        get_body = _json.loads(sent2[0])
+        self.assertEqual(post_body["source"], get_body["source"])
+
+
 if __name__ == "__main__":
     unittest.main()

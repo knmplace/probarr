@@ -20,12 +20,11 @@ jobs:
         with:
           python-version: "3.x"
 
-      # Report-only for now: the suite has pre-existing, tracked failures
-      # unrelated to this gate (see probarr-9wl/vyx/kva). Once those close
-      # and this step is green, flip continue-on-error to false so a real
-      # regression actually blocks the image from publishing (probarr-96q).
+      # Blocking. This was report-only while the suite had the Windows
+      # file:// fixture failures; those are fixed, the step has since gone
+      # green on main, so a real regression now stops the image being
+      # published rather than shipping quietly.
       - name: Run test suite
-        continue-on-error: true
         run: python -m unittest discover tests
 
   build-and-push:

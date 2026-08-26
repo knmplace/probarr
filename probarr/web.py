@@ -411,8 +411,17 @@ class Handler(BaseHTTPRequestHandler):
             body, sent = self._json_body()
             if sent:
                 return
-            return self._send(json.dumps(settings_mod.write(self.root, body)),
-                              "application/json")
+            # Redacted on the way OUT as well as in, or the save
+            # round-trip hands the credential straight back -- into the
+            # response body, into any proxy log on that leg, and into the
+            # field on screen until the next reload. The GET was fixed
+            # first (PR #1); this is the other half. The page's own save
+            # handler reads this response back into the field and into its
+            # as-loaded comparison value, so both directions agreeing is
+            # what stops an untouched field being saved over the secret.
+            return self._send(
+                json.dumps(settings_mod.redact(settings_mod.write(self.root, body))),
+                "application/json")
 
         if path == "/api/backup/import":
             # A restore rewrites providers, lineups, wantlists and every
