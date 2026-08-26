@@ -2480,5 +2480,230 @@ class TestWantlistWriteIsAtomic(Temp):
         self.assertEqual(leftovers, [])
 
 
+class TestCodeReviewFixes(Temp):
+    """Regression tests for the nine findings from the high-effort review.
+    Several were regressions introduced by earlier fixes in the same batch,
+    which is exactly why they get tests rather than just patches.
+    """
+
+    def _handler(self):
+        from probarr import web as web_mod
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        sent = []
+        h._send = lambda body, ctype="text/plain", code=200: sent.append(
+            (code, body))
+        return h, sent
+
+    # -- export.m3u crash on a run with no directory ----------------------
+    def test_export_m3u_on_an_unknown_run_is_a_404_not_a_crash(self):
+        h, sent = self._handler()
+        h._export_m3u("ghost-run")          # used to raise FileNotFoundError
+        self.assertEqual(sent[0][0], 404)
+
+    def test_export_m3u_creates_nothing_on_disk_for_an_unknown_run(self):
+        h, _ = self._handler()
+        before = sorted(os.listdir(self.root))
+        h._export_m3u("ghost-run")
+        self.assertEqual(sorted(os.listdir(self.root)), before)
+
+    # -- only an invalid run id is a 400 ----------------------------------
+    def test_corrupt_run_json_is_not_reported_as_a_bad_request(self):
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+        store = RunStore(self.root, "run1", create=True)
+        store.write_meta({})
+        with open(store.meta_path, "w") as f:
+            f.write("{truncated")          # a crash mid-write
+        h, sent = self._handler()
+        h.path = "/run/run1/curate"
+        with self.assertRaises(ValueError):
+            h.do_GET()                      # propagates as a server fault
+        self.assertEqual(sent, [], "a corrupt run.json must not answer 400")
+
+    def test_an_invalid_run_id_is_still_a_400(self):
+        h, sent = self._handler()
+        h.path = "/run/.hidden/thumbs/x.jpg"
+        h.do_GET()
+        self.assertEqual(sent[0][0], 400)
+
+    # -- gzip sources must not leak the handle they wrap ------------------
+    def test_closing_a_gzipped_guide_closes_the_underlying_file(self):
+        import gzip as _gzip
+        from probarr import epg as epg_mod
+        path = os.path.join(self.root, "guide.xml.gz")
+        with _gzip.open(path, "wb") as f:
+            f.write(b'<?xml version="1.0"?><tv><channel id="c1">'
+                    b'<display-name>X</display-name></channel></tv>')
+        stream = epg_mod._open(path)
+        inner = stream._wrapped
+        stream.close()
+        self.assertTrue(inner.closed,
+                        "GzipFile.close() leaves its fileobj open unless "
+                        "the close is cascaded")
+
+    def test_a_gzipped_guide_still_parses(self):
+        import gzip as _gzip
+        from probarr.epg import Guide
+        path = os.path.join(self.root, "guide.xml.gz")
+        with _gzip.open(path, "wb") as f:
+            f.write(b'<?xml version="1.0"?><tv><channel id="c1">'
+                    b'<display-name>BBC One</display-name></channel></tv>')
+        self.assertEqual(Guide.load(path).display_names["c1"], ["BBC One"])
+
+    # -- a pinned EPG source's answer stands, including "nothing on" ------
+    def _guide(self, name, channel_name, title=None):
+        import datetime as _dt
+        xml = os.path.join(self.root, name + ".xml")
+        now = _dt.datetime.now(_dt.timezone.utc)
+        prog = ""
+        if title:
+            s = (now - _dt.timedelta(minutes=30)).strftime("%Y%m%d%H%M%S +0000")
+            e = (now + _dt.timedelta(minutes=30)).strftime("%Y%m%d%H%M%S +0000")
+            prog = (f'<programme channel="c1" start="{s}" stop="{e}">'
+                   f'<title>{title}</title></programme>')
+        with open(xml, "w", encoding="utf-8") as f:
+            f.write(f'<?xml version="1.0"?><tv><channel id="c1">'
+                   f'<display-name>{channel_name}</display-name></channel>'
+                   f'{prog}</tv>')
+        from probarr import epgsources
+        epgsources.save(self.root, name, "file://" + xml)
+
+    def test_a_pinned_source_with_a_schedule_gap_does_not_fall_through(self):
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+        web_mod.Handler.root = self.root
+        # The pinned source carries the channel but has nothing on air.
+        self._guide("aaa-other", "National Geographic", "Wrong Programme")
+        self._guide("zzz-pinned", "National Geographic", None)
+        store = RunStore(self.root, "run1", create=True)
+        store.write_selection({"NATGEO": {"epg_source": "zzz-pinned"}})
+        got = web_mod.Handler._expected_now(
+            {"channel_key": "NATGEO", "stream_name": "National Geographic",
+             "tvg_id": ""}, store)
+        self.assertIsNone(got, "a gap in the pinned source must not be "
+                               "filled from a different source")
+
+    def test_a_pinned_source_that_does_not_carry_the_channel_still_falls_back(self):
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+        web_mod.Handler.root = self.root
+        self._guide("aaa-other", "National Geographic", "Real Programme")
+        self._guide("zzz-pinned", "Some Other Channel", "Irrelevant")
+        store = RunStore(self.root, "run1", create=True)
+        store.write_selection({"NATGEO": {"epg_source": "zzz-pinned"}})
+        got = web_mod.Handler._expected_now(
+            {"channel_key": "NATGEO", "stream_name": "National Geographic",
+             "tvg_id": ""}, store)
+        self.assertEqual(got["title"], "Real Programme")
+
+    # -- a channel with no number is reported, not silently skipped -------
+    def test_a_channel_with_no_number_is_reported_as_dropped(self):
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+        store = RunStore(self.root, "run1", create=True)
+        store.append({"rec_key": "ORPHAN|s1", "channel_key": "ORPHAN",
+                      "stream_id": "s1", "stream_name": "Orphan",
+                      "status": "ok", "url": "http://x/1", "url_redacted": "",
+                      "group": "", "logo": "", "tvg_id": "", "probed_at": 1})
+        store.write_wantlist_raw([{"key": "ORPHAN", "name": "Orphan"}], [])
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        curated, dropped = h._resolve_curated(store, report_dropped=True)
+        self.assertEqual(curated, [])
+        self.assertEqual([d["key"] for d in dropped], ["ORPHAN"])
+        self.assertIn("number", dropped[0]["reason"])
+
+
+class TestLogoCacheDoesNotPoison(Temp):
+    """A failed GitHub fetch used to be written to disk as an empty result
+    for the full TTL -- seven days for the country list -- so one network
+    blip made the logo picker look permanently broken.
+    """
+
+    def test_a_failed_fetch_is_not_cached(self):
+        from probarr import logos as logos_mod
+        logos_mod._mem.clear()
+        with unittest.mock.patch.object(
+                logos_mod, "_get_json", side_effect=OSError("network down")):
+            self.assertEqual(logos_mod.fetch_countries(self.root), [])
+        # Nothing persisted, so the very next call tries the network again.
+        calls = []
+
+        def ok(url):
+            calls.append(url)
+            return [{"name": "united-kingdom", "type": "dir"}]
+        logos_mod._mem.clear()
+        with unittest.mock.patch.object(logos_mod, "_get_json", ok):
+            self.assertEqual(logos_mod.fetch_countries(self.root),
+                             ["united-kingdom"])
+        self.assertEqual(len(calls), 1, "the failure was cached and blocked "
+                                        "a later successful fetch")
+
+    def test_a_failure_falls_back_to_a_stale_cached_copy(self):
+        from probarr import logos as logos_mod
+        logos_mod._mem.clear()
+        with unittest.mock.patch.object(
+                logos_mod, "_get_json",
+                return_value=[{"name": "united-kingdom", "type": "dir"}]):
+            logos_mod.fetch_countries(self.root)
+        # Age the cache past its TTL, then fail the network.
+        import time as _time
+        path = logos_mod._disk_path(self.root, "countries")
+        old = _time.time() - (logos_mod._COUNTRIES_TTL + 60)
+        os.utime(path, (old, old))
+        logos_mod._mem.clear()
+        with unittest.mock.patch.object(
+                logos_mod, "_get_json", side_effect=OSError("network down")):
+            self.assertEqual(logos_mod.fetch_countries(self.root),
+                             ["united-kingdom"])
+
+    def test_a_genuinely_empty_result_is_still_cached(self):
+        from probarr import logos as logos_mod
+        logos_mod._mem.clear()
+        with unittest.mock.patch.object(logos_mod, "_get_json",
+                                        return_value=[]) as fake:
+            self.assertEqual(logos_mod.fetch_countries(self.root), [])
+            logos_mod._mem.clear()
+            self.assertEqual(logos_mod.fetch_countries(self.root), [])
+        self.assertEqual(fake.call_count, 1)
+
+
+class TestGetOrCreateLogoDoesNotRescan(unittest.TestCase):
+    """The pre-scan re-answered a question its only caller had already
+    answered, at the cost of a full paginated fetch of the Logo table per
+    new logo -- fifty curated logos meant fifty redundant full fetches
+    against an API that rate-limits.
+    """
+
+    def _client(self, existing):
+        from probarr.sources.dispatcharr import Dispatcharr
+        c = Dispatcharr("http://fake", "u", "p")
+        c.calls = []
+
+        def api(method, path, body=None):
+            c.calls.append((method, path))
+            if method == "POST" and path == "/api/channels/logos/":
+                if any(l["url"] == body["url"] for l in existing):
+                    raise RuntimeError("400 duplicate url")
+                row = {"id": 900 + len(existing), **body}
+                existing.append(row)
+                return row
+            if path.startswith("/api/channels/logos/"):
+                return {"results": existing}
+            raise AssertionError(path)
+        c.api = api
+        return c
+
+    def test_a_new_logo_costs_one_call_and_no_listing(self):
+        c = self._client([])
+        self.assertEqual(c.get_or_create_logo("BBC One", "http://l/1.png"), 900)
+        self.assertEqual(c.calls, [("POST", "/api/channels/logos/")])
+
+    def test_a_duplicate_still_resolves_to_the_existing_row(self):
+        c = self._client([{"id": 5, "name": "BBC One", "url": "http://l/1.png"}])
+        self.assertEqual(c.get_or_create_logo("BBC One", "http://l/1.png"), 5)
+
+
 if __name__ == "__main__":
     unittest.main()

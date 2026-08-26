@@ -20,6 +20,16 @@ import shutil
 import time
 
 
+class InvalidRunId(ValueError):
+    """A run id that could name something other than a direct child of the
+    run root. A ValueError subclass so existing broad handlers still catch
+    it, but its own type so the web layer can answer 400 for THIS and not
+    for every other ValueError in the codebase -- json.JSONDecodeError is a
+    ValueError too, and reporting a corrupt run.json as "bad request" tells
+    the operator the wrong thing entirely.
+    """
+
+
 class RunStore:
     def __init__(self, root, run_id=None, create=None):
         """`create` decides whether this run's subdirectories are made now.
@@ -48,7 +58,7 @@ class RunStore:
         if (os.sep in self.run_id or (os.altsep and os.altsep in self.run_id)
                 or self.run_id in (os.curdir, os.pardir)
                 or self.run_id.startswith(".")):
-            raise ValueError(f"invalid run id: {run_id!r}")
+            raise InvalidRunId(f"invalid run id: {run_id!r}")
         self.dir = os.path.join(self.root, self.run_id)
         self.thumbs = os.path.join(self.dir, "thumbs")
         self.frames = os.path.join(self.dir, "frames")

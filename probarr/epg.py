@@ -81,6 +81,29 @@ class _Chained(io.RawIOBase):
             super().close()
 
 
+class _ClosingGzipFile(gzip.GzipFile):
+    """A GzipFile that closes the stream it was handed.
+
+    gzip.GzipFile only closes a file it opened ITSELF (by name); given a
+    `fileobj` it deliberately leaves it open, on the assumption the caller
+    owns it. Here the caller does not -- _open() constructs the underlying
+    handle purely to feed this -- so without cascading the close, every
+    gzipped guide load leaked a file descriptor, and for an http(s) source
+    a live socket. Verified: after gzip.GzipFile(fileobj=raw).close(),
+    raw.closed is False.
+    """
+
+    def __init__(self, fileobj):
+        super().__init__(fileobj=fileobj)
+        self._wrapped = fileobj
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            self._wrapped.close()
+
+
 def _open(source, timeout=120):
     """Open a local path or URL as a STREAM, transparently decompressing gzip.
 
@@ -102,13 +125,13 @@ def _open(source, timeout=120):
         resp = urllib.request.urlopen(req, timeout=timeout)
         head = resp.read(2)
         stream = io.BufferedReader(_Chained(head, resp))
-        return gzip.GzipFile(fileobj=stream) if head == b"\x1f\x8b" else stream
+        return _ClosingGzipFile(stream) if head == b"\x1f\x8b" else stream
     f = open(source, "rb")
     # Local files are seekable, so sniffing costs nothing and needs no
     # replay -- just rewind.
     head = f.read(2)
     f.seek(0)
-    return gzip.GzipFile(fileobj=f) if head == b"\x1f\x8b" else f
+    return _ClosingGzipFile(f) if head == b"\x1f\x8b" else f
 
 
 class Guide:

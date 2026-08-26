@@ -40,7 +40,7 @@ from .sources import m3u, load_source
 from .sources.base import Stream
 from .sources import dispatcharr as dispatcharr_mod
 from .sources.dispatcharr import client_from_spec, base_url_of
-from .store import RunStore
+from .store import RunStore, InvalidRunId
 from .normalize import Normalizer, group_candidates, declared_quality_rank
 from .probe import ProbeOptions, probe
 from .theme import CSS, topbar
@@ -165,12 +165,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             return self._do_GET()
-        except ValueError as e:
-            # A malformed run id (see RunStore's constructor) is a bad
-            # request, not a server fault -- and letting it escape here
-            # dropped the connection outright, which is a worse failure
-            # than the unbounded directory creation the validation was
-            # added to stop. Answered cleanly instead.
+        except InvalidRunId as e:
+            # A malformed run id is a bad request, not a server fault --
+            # and letting it escape here dropped the connection outright,
+            # which is a worse failure than the unbounded directory
+            # creation the validation was added to stop.
+            #
+            # Deliberately NOT `except ValueError`: json.JSONDecodeError is
+            # a ValueError, so that caught a truncated run.json (read_meta
+            # parses it with no guard) and answered 400 "Expecting value:
+            # line 1 column 1" -- telling the operator their request was
+            # malformed when in fact their stored data is corrupt.
             return self._send(json.dumps({"error": str(e)[:200]}),
                               "application/json", 400)
 
@@ -391,7 +396,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             return self._do_POST()
-        except ValueError as e:
+        except InvalidRunId as e:
             return self._send(json.dumps({"error": str(e)[:200]}),
                               "application/json", 400)
 
@@ -946,13 +951,20 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError, TypeError):
                 pass   # a corrupt or older-format cache is just a miss
         streams = load_source(spec)
+        tmp = path + ".tmp"
         try:
-            tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump([dataclasses.asdict(s) for s in streams], f)
             os.replace(tmp, path)
         except (OSError, TypeError):
-            pass       # disk caching is a courtesy; never break the real fetch
+            # Disk caching is a courtesy; never break the real fetch. But
+            # take the partial file with us -- the usual trigger is a full
+            # disk, which is the worst moment to leave a 12MB orphan
+            # behind on every subsequent load.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         return streams
 
     def _catalog_pools(self, store):
@@ -2700,9 +2712,16 @@ class Handler(BaseHTTPRequestHandler):
                     cid = (override_id if override_id and override_id in g.display_names
                           else g.resolve(record.get("tvg_id") or None, name, norm))
                     if cid:
-                        now = g.now_playing(cid, at)
-                        if now:
-                            return now
+                        # Whatever this source says STANDS, including None.
+                        # Falling through on a None meant a schedule gap in
+                        # the pinned source (overnight, or a source that
+                        # simply stops at midnight) silently stamped the
+                        # frame with a DIFFERENT source's programme --
+                        # reintroducing, in a narrower form, exactly the
+                        # wrong-source capture this branch exists to stop.
+                        # Only an unusable pick (source deleted, or it does
+                        # not carry this channel at all) falls through.
+                        return g.now_playing(cid, at)
             for src in epgsources_mod.list_all(cls.root):
                 g = epgcheck_mod.load_cached(src["url"], root=cls.root)
                 cid = g.build_name_index(norm).resolve(
@@ -3209,6 +3228,14 @@ class Handler(BaseHTTPRequestHandler):
             # where number and name come from), and four of them were
             # pushed into a real lineup that way.
             if ch["number"] is None:
+                # Reported for the same reason the two skips above are: a
+                # channel that silently appears in neither the playlist nor
+                # the push preview is indistinguishable from one nobody
+                # asked for.
+                dropped.append({"key": ch["key"], "number": None,
+                               "name": ch["title"],
+                               "reason": "no channel number -- add one in the "
+                                         "wantlist before this can be exported"})
                 continue
             fallback = picked[1] if len(picked) > 1 else None
             chan_tvg_id = tvg.get(ch["key"], "")
@@ -3244,6 +3271,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _export_m3u(self, run_id):
         store = RunStore(self.root, run_id)
+        # Every sibling export/read endpoint guards on this; without it,
+        # writing the playlist into a run directory that does not exist
+        # raised FileNotFoundError straight out of the handler and dropped
+        # the connection. Latent until RunStore stopped creating
+        # directories on read, at which point it became reachable with any
+        # unknown run id.
+        if not os.path.exists(store.results_path):
+            return self._send('{"error":"no such run"}', "application/json", 404)
         curated = self._resolve_curated(store)
         # Everything the curator decided, carried into the file: the
         # per-channel group (which the Dispatcharr push already honoured

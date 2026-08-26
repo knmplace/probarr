@@ -67,20 +67,49 @@ def _cached_json(root, key, ttl, fetch):
     if hit and now - hit[1] < ttl:
         return hit[0]
     path = _disk_path(root, key)
-    if os.path.exists(path) and now - os.path.getmtime(path) < ttl:
+
+    def from_disk():
         try:
             with open(path, "r", encoding="utf-8") as f:
-                value = json.load(f)
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    if os.path.exists(path) and now - os.path.getmtime(path) < ttl:
+        value = from_disk()
+        if value is not None:
             _mem[key] = (value, now)
             return value
-        except (OSError, ValueError):
-            pass
-    value = fetch()
+
+    # A FAILED fetch must never be cached. It used to be: the fetchers
+    # swallowed every exception and returned [], which was then written to
+    # disk and memory for the full TTL -- so one blip (a VPN reconnect, a
+    # GitHub rate limit) left the logo picker showing an empty country list
+    # for SEVEN DAYS, with no error and no way to refresh. Indistinguishable
+    # from the feature being broken.
+    try:
+        value = fetch()
+    except Exception:
+        # A stale copy beats nothing: a week-old directory listing of a
+        # stable public repo is still perfectly usable, and this is exactly
+        # the moment it earns its keep. Returned WITHOUT re-caching, so the
+        # next call tries the network again rather than being locked out.
+        stale = from_disk()
+        return stale if stale is not None else []
+
     _mem[key] = (value, now)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(value, f)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(value, f)
+        os.replace(tmp, path)
+    except OSError:
+        # Persisting is an optimisation, not the answer -- an unwritable
+        # config dir must not break the picker.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
     return value
 
 
@@ -95,33 +124,31 @@ def _get_json(url):
 def fetch_countries(root):
     """Every country/region folder name in the repo, alphabetical.
 
-    Best-effort: an API hiccup (rate limit, network blip) yields an empty
-    list rather than an exception -- a search with no country choices is a
-    worse UI moment than a broken one, but not a broken run.
+    Best-effort at the caller's level: a failure falls back to the last
+    cached copy if there is one, and otherwise an empty list -- but is
+    never itself cached. See _cached_json.
     """
     def do_fetch():
-        try:
-            data = _get_json(_API_BASE)
-            if not isinstance(data, list):
-                return []
-            return sorted(item["name"] for item in data
-                          if item.get("type") == "dir")
-        except Exception:
-            return []
+        data = _get_json(_API_BASE)
+        if not isinstance(data, list):
+            raise ValueError("unexpected response from the GitHub API")
+        return sorted(item["name"] for item in data
+                      if item.get("type") == "dir")
     return _cached_json(root, "countries", _COUNTRIES_TTL, do_fetch)
 
 
 def fetch_country_logos(root, country_dir):
-    """Every image filename in one country folder. [] on any failure."""
+    """Every image filename in one country folder.
+
+    Falls back to a stale cached copy on failure, and never caches the
+    failure itself -- see _cached_json.
+    """
     def do_fetch():
-        try:
-            data = _get_json(f"{_API_BASE}/{country_dir}")
-            if not isinstance(data, list):
-                return []
-            return sorted(item["name"] for item in data
-                          if item.get("name", "").lower().endswith(_IMAGE_EXTS))
-        except Exception:
-            return []
+        data = _get_json(f"{_API_BASE}/{country_dir}")
+        if not isinstance(data, list):
+            raise ValueError("unexpected response from the GitHub API")
+        return sorted(item["name"] for item in data
+                      if item.get("name", "").lower().endswith(_IMAGE_EXTS))
     return _cached_json(root, f"country:{country_dir}", _FILES_TTL, do_fetch)
 
 

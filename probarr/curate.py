@@ -2518,7 +2518,11 @@ async function openEpgModal(){
 // module docstring for why that distinction is the whole point.
 let LOGO_COUNTRIES = null;
 async function ensureLogoCountries(){
-  if(LOGO_COUNTRIES) return LOGO_COUNTRIES;
+  // Length-checked, not just truthiness: [] is truthy in JavaScript, so a
+  // plain `if(LOGO_COUNTRIES)` treated an empty result as a successful
+  // load and never asked again for the rest of the session -- locking the
+  // picker into a blank country list after a single failed request.
+  if(LOGO_COUNTRIES && LOGO_COUNTRIES.length) return LOGO_COUNTRIES;
   try{
     const d = await (await fetch("/run/"+encodeURIComponent(DATA.run_id)+
       "/logo-countries", {cache:"no-store"})).json();
@@ -2568,10 +2572,14 @@ async function renderLogoSection(ch, epgSources){
   const countrySel = document.getElementById("em-logo-country");
   if(!countrySel.dataset.loaded){
     const countries = await ensureLogoCountries();
-    countrySel.innerHTML = countries.map(c =>
-      '<option value="'+esc(c)+'"'+(c==="united-kingdom"?" selected":"")+'>'+
-      esc(c)+'</option>').join("");
-    countrySel.dataset.loaded = "1";
+    countrySel.innerHTML = countries.length
+      ? countries.map(c =>
+          '<option value="'+esc(c)+'"'+(c==="united-kingdom"?" selected":"")+'>'+
+          esc(c)+'</option>').join("")
+      : '<option value="">could not load \u2014 reopen to retry</option>';
+    // Only latched on success, so a failed load is retried next time the
+    // modal opens instead of leaving a permanently empty dropdown.
+    if(countries.length) countrySel.dataset.loaded = "1";
   }
   document.getElementById("em-logo-q").value = "";
   document.getElementById("em-logo-results").innerHTML = "";

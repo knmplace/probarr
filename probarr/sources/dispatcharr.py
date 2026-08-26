@@ -298,20 +298,27 @@ class Dispatcharr:
         channel silently ends up with no icon, exactly like an
         unlinked M3U logo would. This is the create half get_or_create_group()
         already does for groups, applied to the same problem for logos.
+
+        Creates FIRST and only looks up on failure, rather than scanning
+        the whole Logo table up front. Dispatcharr enforces a unique URL on
+        Logo, so a duplicate is a clean 400 that the recovery path below
+        resolves into an ordinary lookup. A pre-scan would be a full
+        paginated fetch of every logo in the instance, per call -- and the
+        one caller (dispatcharr_export.logo_id_for) has already established
+        the URL is absent from a map built from that same endpoint, so it
+        would be re-answering a question it was just handed the answer to.
+        Curating logos for fifty channels turned that into fifty redundant
+        full-table fetches against an API that rate-limits.
         """
-        for l in self.logos():
-            if l.get("url") == url:
-                return l["id"]
         try:
             created = self.api("POST", "/api/channels/logos/",
                                {"name": name, "url": url})
             return created["id"]
         except Exception:
-            # Dispatcharr enforces a unique URL on Logo and 400s a duplicate
-            # create -- possible if something else (another push, a
-            # concurrent request) created this exact URL between the lookup
-            # above and this POST. Re-checking turns that race into a lookup
-            # instead of a failed push.
+            # A duplicate URL (another push, a concurrent request, or a
+            # caller with no prior map) lands here -- resolve it into the
+            # existing row rather than failing the push. Anything else
+            # re-raises once we have confirmed it was not a duplicate.
             for l in self.logos():
                 if l.get("url") == url:
                     return l["id"]
