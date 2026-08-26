@@ -330,6 +330,14 @@ tidiness: a real M3U account's connection limit is enforced against Live
 TV playback and VOD together, which a custom stream is invisible to
 regardless of which account it's filed under.
 
+The export panel's "change" options include an opt-in checkbox — off by
+default — to create that real Dispatcharr M3U account for this run's own
+provider if one doesn't exist yet, instead of leaving every candidate to
+fall back to the shared "custom" account. It's off by default because
+creating an account is a real, visible change to your Dispatcharr instance
+(a new entry in its own UI, an immediate one-time refresh), not something
+worth doing silently on every push.
+
 ## Browsing a source without probing
 
 `/browse` (linked from Wantlists) is the answer to "I don't have a wantlist
