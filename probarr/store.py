@@ -21,16 +21,43 @@ import time
 
 
 class RunStore:
-    def __init__(self, root, run_id=None):
+    def __init__(self, root, run_id=None, create=None):
+        """`create` decides whether this run's subdirectories are made now.
+
+        Default (None) means "only if this run already exists, or is brand
+        new (no id given)". That is deliberately NOT the old behaviour of
+        always creating them: a run id arrives from a URL on nearly every
+        read path, and unconditionally os.makedirs'ing four directories
+        under it meant a single unauthenticated GET to
+        /run/<anything>/thumbs/x.jpg created directories on disk. Nothing
+        bounded that, so a crawler could exhaust inodes. Reported by a
+        reviewer, and confirmed by doing it to a live instance.
+
+        Callers that genuinely create a run (runner.start_run) pass
+        create=True; everything else reads, and a read of a run that does
+        not exist should leave the disk exactly as it found it.
+        """
         self.root = os.path.abspath(root)
         self.run_id = run_id or time.strftime("%Y%m%d-%H%M%S")
+        # A run id becomes a directory name, so this is a security boundary
+        # rather than tidiness -- the same reasoning wantlist.safe_name()
+        # already applies to wantlist names, and that delete() has always
+        # applied to its own run id. Rejected rather than sanitised: a
+        # silently-rewritten id would address a DIFFERENT run than the
+        # caller asked for, which is worse than an error.
+        if (os.sep in self.run_id or (os.altsep and os.altsep in self.run_id)
+                or self.run_id in (os.curdir, os.pardir)
+                or self.run_id.startswith(".")):
+            raise ValueError(f"invalid run id: {run_id!r}")
         self.dir = os.path.join(self.root, self.run_id)
         self.thumbs = os.path.join(self.dir, "thumbs")
         self.frames = os.path.join(self.dir, "frames")
         self.crops = os.path.join(self.dir, "crops")
         self.clips = os.path.join(self.dir, "clips")
-        for d in (self.thumbs, self.frames, self.crops, self.clips):
-            os.makedirs(d, exist_ok=True)
+        if create is None:
+            create = run_id is None or os.path.isdir(self.dir)
+        if create:
+            self._ensure_dirs()
         self.selection_path = os.path.join(self.dir, "selection.json")
         self.wantlist_path = os.path.join(self.dir, "wantlist.json")
         self.results_path = os.path.join(self.dir, "results.jsonl")
@@ -39,8 +66,20 @@ class RunStore:
         self.removals_path = os.path.join(self.dir, "removals.json")
         self.excluded_path = os.path.join(self.dir, "excluded_streams.json")
 
+    def _ensure_dirs(self):
+        """Make this run's directories. Called from the constructor only for
+        a run that exists (or is being created), and otherwise from each
+        WRITE below -- which is the whole point of the split: writing is a
+        legitimate reason to bring a run into existence, reading never is.
+        Anything reaching a write has already gone through the real request
+        path; a bare GET for a nonexistent run gets nowhere near one.
+        """
+        for d in (self.thumbs, self.frames, self.crops, self.clips):
+            os.makedirs(d, exist_ok=True)
+
     # -- meta ---------------------------------------------------------------
     def write_meta(self, meta: dict):
+        self._ensure_dirs()
         meta = {**meta, "run_id": self.run_id, "updated": time.time()}
         tmp = self.meta_path + ".tmp"
         with open(tmp, "w") as f:
@@ -56,6 +95,7 @@ class RunStore:
     # -- results ------------------------------------------------------------
     def append(self, record: dict):
         """Append one probe result and flush it to the OS immediately."""
+        self._ensure_dirs()
         with open(self.results_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
@@ -158,6 +198,7 @@ class RunStore:
         return data if isinstance(data, list) else []
 
     def write_removals(self, items):
+        self._ensure_dirs()
         tmp = self.removals_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(items, f, indent=2)
@@ -198,6 +239,7 @@ class RunStore:
         return data if isinstance(data, dict) else {}
 
     def write_excluded(self, items):
+        self._ensure_dirs()
         tmp = self.excluded_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(items, f, indent=2)
@@ -371,15 +413,19 @@ class RunStore:
         return "".join(c if c.isalnum() or c in "-_" else "_" for c in rec_key)
 
     def thumb_path(self, rec_key):
+        self._ensure_dirs()
         return os.path.join(self.thumbs, f"{self.safe_name(rec_key)}.jpg")
 
     def frame_path(self, rec_key):
+        self._ensure_dirs()
         return os.path.join(self.frames, f"{self.safe_name(rec_key)}.jpg")
 
     def crop_path(self, rec_key):
+        self._ensure_dirs()
         return os.path.join(self.crops, f"{self.safe_name(rec_key)}.jpg")
 
     def clip_path(self, rec_key):
+        self._ensure_dirs()
         return os.path.join(self.clips, f"{self.safe_name(rec_key)}.mp4")
 
     # -- curation state -----------------------------------------------------
@@ -390,6 +436,7 @@ class RunStore:
         survives a different browser, a different machine, and clearing site
         data -- it represents real human effort that would be tedious to redo.
         """
+        self._ensure_dirs()
         tmp = self.selection_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(selection, f, indent=2)
@@ -406,6 +453,7 @@ class RunStore:
 
     # -- Dispatcharr export status -------------------------------------------
     def write_push_status(self, status: dict):
+        self._ensure_dirs()
         """Persist Dispatcharr export progress server-side, same reasoning as
         write_selection(): a push previously lived entirely in one browser
         tab's in-flight fetch, with no way to tell "still going" from "gave
@@ -429,11 +477,13 @@ class RunStore:
             return None
 
     def write_wantlist(self, wanted, missing):
+        self._ensure_dirs()
         with open(self.wantlist_path, "w", encoding="utf-8") as f:
             json.dump({"wanted": [w.as_dict() for w in wanted],
                        "missing": [w.as_dict() for w in missing]}, f, indent=2)
 
     def write_wantlist_raw(self, wanted, missing):
+        self._ensure_dirs()
         """Write an already-plain-dict wantlist.
 
         write_wantlist() takes the parser's objects and calls as_dict() on

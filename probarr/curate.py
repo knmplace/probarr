@@ -253,6 +253,7 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
 .dm-plan .pcounts{font-size:12px;color:var(--dim);margin-bottom:8px}
 .dm-plan .pcounts b{color:var(--text)}
 .dm-row.delete .pname,.dm-row.delete .pchg{color:var(--bad)}
+.dm-row.dropped .pname,.dm-row.dropped .pchg{color:var(--warn)}
 .dm-row{display:flex;gap:8px;align-items:baseline;padding:4px 6px;border-radius:3px;
   font-size:12px;border-left:2px solid transparent}
 .dm-row.create{border-left-color:var(--ok);background:rgba(39,194,76,.06)}
@@ -3411,9 +3412,16 @@ document.getElementById("dm-preview").addEventListener("click", async () => {
       // would make an empty preview ambiguous between "no changes" and
       // "preview broken".
       const dels = d.removals || [];
+      // Channels the provider has stopped carrying. Nothing is done to
+      // them -- the push never deletes on its own -- but they used to be
+      // skipped in total silence, so a channel could sit dead in
+      // Dispatcharr indefinitely with the preview cheerfully reporting
+      // "no change" for everything it DID carry.
+      const gone = d.dropped || [];
       box.innerHTML = '<div class="pcounts"><b>'+c.create+'</b> to create, <b>'+
         c.update+'</b> to update, <b>'+c.unchanged+'</b> already correct'+
-        (dels.length ? ', <b>'+dels.length+'</b> to DELETE' : '')+'</div>'+
+        (dels.length ? ', <b>'+dels.length+'</b> to DELETE' : '')+
+        (gone.length ? ', <b>'+gone.length+'</b> no longer carried' : '')+'</div>'+
         // Deletions lead. They are the only irreversible thing a push does,
         // so burying them under forty unchanged rows would defeat the point
         // of previewing at all.
@@ -3423,6 +3431,12 @@ document.getElementById("dm-preview").addEventListener("click", async () => {
           '</span><span class="pchg">'+
           (x.present ? "will be DELETED from Dispatcharr"
                      : "already gone from Dispatcharr")+'</span></div>').join("")+
+        gone.map(x =>
+          '<div class="dm-row dropped"><span class="pname">'+
+          (x.number!=null?x.number+' ':'')+esc(x.name||"")+
+          '</span><span class="pchg">'+esc(x.reason||"no usable stream")+
+          (x.present ? ' — still live in Dispatcharr, left untouched'
+                     : ' — not in Dispatcharr')+'</span></div>').join("")+
         d.actions.map(a =>
           '<div class="dm-row '+a.kind+'"><span class="pname">'+
           (a.number!=null?a.number+' ':'')+esc(a.name)+'</span><span class="pchg">'+

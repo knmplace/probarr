@@ -2222,5 +2222,207 @@ class TestLogos(Temp):
                          "main/countries/united-kingdom/bbc-one-uk.png")
 
 
+class TestRunIdIsNotAPath(Temp):
+    """Reported by a reviewer on Discord, and confirmed by exercising it
+    against a live instance: RunStore's constructor built a directory path
+    straight from a URL-supplied run id and os.makedirs'd four
+    subdirectories under it, with no validation at all. A single
+    unauthenticated GET to /run/<anything>/thumbs/x.jpg therefore created
+    directories on disk -- unbounded, so a crawler or a script could
+    exhaust inodes. RunStore.delete() already validated its run id with
+    realpath for exactly this reason; the constructor never did.
+    """
+
+    def test_a_traversing_run_id_cannot_escape_the_root(self):
+        from probarr.store import RunStore
+        for evil in ("../escape", "..", ".", "a/b", "..\\escape", "/etc"):
+            with self.assertRaises(ValueError, msg=f"accepted {evil!r}"):
+                RunStore(self.root, evil)
+
+    def test_an_unknown_run_id_creates_nothing_on_disk(self):
+        from probarr.store import RunStore
+        before = sorted(os.listdir(self.root))
+        RunStore(self.root, "never-seen-before")
+        self.assertEqual(sorted(os.listdir(self.root)), before,
+                         "reading an unknown run must not create directories")
+
+    def test_an_existing_run_still_gets_its_subdirectories(self):
+        from probarr.store import RunStore
+        RunStore(self.root, "real-run", create=True)
+        again = RunStore(self.root, "real-run")
+        self.assertTrue(os.path.isdir(again.thumbs))
+        self.assertTrue(os.path.isdir(again.clips))
+
+    def test_a_brand_new_run_with_no_id_still_creates_its_own_home(self):
+        from probarr.store import RunStore
+        s = RunStore(self.root)
+        self.assertTrue(os.path.isdir(s.frames))
+
+    def test_a_rejected_run_id_answers_400_rather_than_dropping_the_request(self):
+        # Confirmed live: raising out of the handler dropped the connection
+        # outright (curl reported HTTP 000), which is a worse failure than
+        # the directory creation the validation exists to prevent.
+        from probarr import web as web_mod
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        sent = []
+        h._send = lambda body, ctype="text/plain", code=200: sent.append(code)
+        h.path = "/run/.hidden/thumbs/x.jpg"
+        h.do_GET()
+        self.assertEqual(sent, [400])
+
+
+class TestCatalogCacheIsNotPickle(Temp):
+    """The provider-catalogue disk cache used pickle.load(), which is
+    arbitrary code execution for anyone able to write into the config
+    directory. Stream is a plain dataclass, so JSON carries it losslessly
+    with none of that exposure.
+    """
+
+    def test_round_trips_streams_through_the_disk_cache(self):
+        from probarr import web as web_mod
+        from probarr.sources.base import Stream
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        made = [Stream(id="m3u:abc", name="BBC One", url="http://x/1",
+                       group="UK", logo="http://l/1.png", tvg_id="bbc1",
+                       source="m3u", attrs={"k": "v"})]
+        with unittest.mock.patch.object(web_mod, "load_source",
+                                        return_value=made) as fake:
+            first = h._load_source_cached("m3u://fake")
+            second = h._load_source_cached("m3u://fake")   # served from disk
+            self.assertEqual(fake.call_count, 1)
+        self.assertEqual([s.name for s in second], ["BBC One"])
+        self.assertEqual(second[0].attrs, {"k": "v"})
+        self.assertEqual(second[0].url, "http://x/1")
+        self.assertIsInstance(second[0], Stream)
+
+    def test_the_cache_file_is_json_not_pickle(self):
+        from probarr import web as web_mod
+        from probarr.sources.base import Stream
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        with unittest.mock.patch.object(
+                web_mod, "load_source",
+                return_value=[Stream(id="i", name="n", url="u")]):
+            h._load_source_cached("m3u://fake")
+        path = h._catalog_disk_path("m3u://fake")
+        with open(path, encoding="utf-8") as f:
+            json.load(f)          # raises if this is a pickle
+
+
+class TestDroppedChannelsAreReported(Temp):
+    """Reported by a reviewer on Discord. A channel the provider has
+    stopped carrying is visible in Curate (it lands as `missing`), but the
+    EXPORT path skipped it with a bare `continue` -- so it appeared nowhere
+    in the push preview, and Dispatcharr silently kept serving the old
+    channel pointing at a now-dead stream. Never deleting is deliberate
+    (see dispatcharr_export.py); giving no signal at all was not.
+    """
+
+    def _run_with_a_dropped_channel(self):
+        from probarr.store import RunStore
+        store = RunStore(self.root, "run1", create=True)
+        # BBCONE probed fine; BBCTWO is wanted but the provider carries
+        # nothing for it any more, so it has no results at all.
+        store.append({"rec_key": "BBCONE|s1", "channel_key": "BBCONE",
+                      "stream_id": "s1", "stream_name": "BBC One",
+                      "status": "ok", "url": "http://x/1", "url_redacted": "",
+                      "group": "", "logo": "", "tvg_id": "", "probed_at": 1})
+        store.write_wantlist_raw(
+            [{"key": "BBCONE", "number": 101, "name": "BBC One"},
+             {"key": "BBCTWO", "number": 102, "name": "BBC Two"}], [])
+        return store
+
+    def test_a_channel_with_no_candidates_is_reported_not_silently_skipped(self):
+        from probarr import web as web_mod
+        store = self._run_with_a_dropped_channel()
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        curated, dropped = h._resolve_curated(store, report_dropped=True)
+        self.assertEqual([c["key"] for c in curated], ["BBCONE"])
+        self.assertEqual([d["key"] for d in dropped], ["BBCTWO"])
+        self.assertEqual(dropped[0]["number"], 102)
+        self.assertEqual(dropped[0]["name"], "BBC Two")
+
+    def test_resolve_curated_still_returns_a_plain_list_by_default(self):
+        from probarr import web as web_mod
+        store = self._run_with_a_dropped_channel()
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        curated = h._resolve_curated(store)
+        self.assertEqual([c["key"] for c in curated], ["BBCONE"])
+
+    def test_an_excluded_channel_is_not_reported_as_dropped(self):
+        from probarr import web as web_mod
+        store = self._run_with_a_dropped_channel()
+        # Deliberately excluded is a decision, not a provider failure.
+        store.write_selection({"BBCTWO": {"include": False}})
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        _, dropped = h._resolve_curated(store, report_dropped=True)
+        self.assertEqual(dropped, [])
+
+
+class TestGuideParsePeakMemory(Temp):
+    """Reported by a reviewer on Discord as "memory usage is high when
+    importing EPG during curation" -- correct, and the code comment above
+    the parse loop actively claimed the opposite ("peak memory stays flat
+    regardless of file size").
+
+    stdlib ElementTree's elem.clear() empties an element but leaves it
+    attached to the root, so the root accumulates one empty element per
+    channel AND per programme in the whole file -- including every
+    programme outside the retention window that gets discarded anyway.
+    Measured on a synthetic 63MB guide before the fix: 104MB peak to
+    retain 9MB of useful data. Detaching consumed elements from the root
+    took the same parse to 0.3MB.
+    """
+
+    def _guide_file(self, channels, programmes_each):
+        import datetime
+        path = os.path.join(self.root, "big.xml")
+        base = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('<?xml version="1.0"?><tv>')
+            for c in range(channels):
+                f.write(f'<channel id="c{c}"><display-name>Chan {c}</display-name></channel>')
+            for c in range(channels):
+                for p in range(programmes_each):
+                    s = (base + datetime.timedelta(hours=p)).strftime("%Y%m%d%H%M%S +0000")
+                    e = (base + datetime.timedelta(hours=p + 1)).strftime("%Y%m%d%H%M%S +0000")
+                    f.write(f'<programme channel="c{c}" start="{s}" stop="{e}">'
+                           f'<title>Prog {p}</title><desc>{"x" * 200}</desc></programme>')
+            f.write('</tv>')
+        return path
+
+    def test_peak_memory_does_not_scale_with_the_discarded_bulk(self):
+        import tracemalloc
+        from probarr.epg import Guide
+        path = self._guide_file(channels=200, programmes_each=150)
+        on_disk = os.path.getsize(path)
+        tracemalloc.start()
+        g = Guide.load(path, window_hours=6)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        self.assertEqual(len(g.display_names), 200)
+        # The whole point: the parser must not hold the file. Before the fix
+        # peak ran to ~1.6x the file size; a third of it is a wide margin
+        # that still fails loudly on any regression to accumulate-the-root.
+        self.assertLess(peak, on_disk / 3,
+                        f"peak {peak/1e6:.1f}MB parsing a {on_disk/1e6:.1f}MB "
+                        "guide -- consumed elements are being retained again")
+
+    def test_the_programmes_actually_in_the_window_still_load(self):
+        import datetime
+        from probarr.epg import Guide
+        at = datetime.datetime.now(datetime.timezone.utc)
+        path = self._guide_file(channels=3, programmes_each=8)
+        g = Guide.load(path, window_hours=48, at=at - datetime.timedelta(days=3))
+        self.assertEqual(len(g.display_names), 3)
+        self.assertTrue(sum(len(v) for v in g.programmes.values()) > 0)
+        self.assertEqual(g.display_names["c1"], ["Chan 1"])
+
+
 if __name__ == "__main__":
     unittest.main()

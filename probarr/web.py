@@ -7,6 +7,7 @@ from any device on the network, rather than copying HTML files around.
 Deliberately stdlib http.server -- no framework, nothing to install, and the
 container needs no extra layer to run it.
 """
+import dataclasses
 import datetime
 import hashlib
 import html
@@ -36,6 +37,7 @@ from .contactsheet import render as render_sheet
 from . import xmltv as xmltv_mod
 from . import dispatcharr_export
 from .sources import m3u, load_source
+from .sources.base import Stream
 from .sources import dispatcharr as dispatcharr_mod
 from .sources.dispatcharr import client_from_spec, base_url_of
 from .store import RunStore
@@ -161,6 +163,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        try:
+            return self._do_GET()
+        except ValueError as e:
+            # A malformed run id (see RunStore's constructor) is a bad
+            # request, not a server fault -- and letting it escape here
+            # dropped the connection outright, which is a worse failure
+            # than the unbounded directory creation the validation was
+            # added to stop. Answered cleanly instead.
+            return self._send(json.dumps({"error": str(e)[:200]}),
+                              "application/json", 400)
+
+    def _do_GET(self):
         path = urllib.parse.urlparse(self.path).path
         if path == "/":
             # The runs list used to live here; it moved to /runs (still on
@@ -375,6 +389,13 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length), False
 
     def do_POST(self):
+        try:
+            return self._do_POST()
+        except ValueError as e:
+            return self._send(json.dumps({"error": str(e)[:200]}),
+                              "application/json", 400)
+
+    def _do_POST(self):
         path = urllib.parse.urlparse(self.path).path
         parts = [p for p in path.split("/") if p]
 
@@ -903,28 +924,34 @@ class Handler(BaseHTTPRequestHandler):
     CATALOG_DISK_TTL = 1800
 
     def _catalog_disk_path(self, spec):
-        import hashlib
         d = os.path.join(self.root, "catalog_cache")
         os.makedirs(d, exist_ok=True)
-        return os.path.join(d, hashlib.sha256(spec.encode()).hexdigest()[:16] + ".pkl")
+        return os.path.join(d, hashlib.sha256(spec.encode()).hexdigest()[:16] + ".json")
 
     def _load_source_cached(self, spec):
-        import pickle
+        """The provider's whole catalogue, reusing a recent copy from disk.
+
+        JSON, not pickle. This used to pickle.dump/pickle.load the Stream
+        list, which hands arbitrary code execution to anyone able to write
+        into the config directory -- a real finding from a reviewer, and an
+        unnecessary risk for what this actually stores: Stream is a plain
+        dataclass of strings plus a dict, so JSON carries it losslessly.
+        """
         path = self._catalog_disk_path(spec)
         if os.path.exists(path) and \
                 (time.time() - os.path.getmtime(path)) < self.CATALOG_DISK_TTL:
             try:
-                with open(path, "rb") as f:
-                    return pickle.load(f)
-            except Exception:
-                pass   # a corrupt or version-mismatched cache is just a miss
+                with open(path, encoding="utf-8") as f:
+                    return [Stream(**row) for row in json.load(f)]
+            except (OSError, ValueError, TypeError):
+                pass   # a corrupt or older-format cache is just a miss
         streams = load_source(spec)
         try:
             tmp = path + ".tmp"
-            with open(tmp, "wb") as f:
-                pickle.dump(streams, f)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump([dataclasses.asdict(s) for s in streams], f)
             os.replace(tmp, path)
-        except OSError:
+        except (OSError, TypeError):
             pass       # disk caching is a courtesy; never break the real fetch
         return streams
 
@@ -3091,13 +3118,26 @@ class Handler(BaseHTTPRequestHandler):
         exactly as they did before lineups existed."""
         return lineups_mod.preferences(self.root, store.read_meta().get("lineup"))
 
-    def _resolve_curated(self, store):
+    def _resolve_curated(self, store, report_dropped=False):
         """Curated channels ready to export: number, title, primary + fallback.
 
         Shared by every export format. Falls back to the automatic ranking
         for any channel not yet reviewed, so an export is useful before
         curation is finished rather than only after -- the curator's explicit
         picks simply override the auto-pick wherever they exist.
+
+        `report_dropped` additionally returns the channels this export is
+        NOT carrying because the provider no longer offers a usable stream
+        for them -- returns (curated, dropped) instead of just curated.
+
+        That exists because of a real reported bug: a channel the provider
+        has stopped carrying was skipped here by a bare `continue`, so it
+        appeared nowhere in the push preview while Dispatcharr quietly kept
+        serving the old channel pointing at a dead stream. Never deleting
+        anything automatically is deliberate (see dispatcharr_export.py's
+        own docstring on why); giving no signal at all was not. A channel
+        deliberately excluded by the curator is NOT reported -- that is a
+        decision, not a provider failure.
         """
         by_channel = annotate_placeholders(store)
         inherited = self._inherited(store)
@@ -3113,11 +3153,17 @@ class Handler(BaseHTTPRequestHandler):
         for r in store.load():
             if r.get("tvg_id") and not tvg.get(r.get("channel_key")):
                 tvg[r["channel_key"]] = r["tvg_id"]
-        out = []
+        out, dropped = [], []
         for ch in payload["channels"]:
             s = sel.get(ch["key"]) or {}
             cands = ch["candidates"]
-            if not cands or (s and not s.get("include", True)):
+            if s and not s.get("include", True):
+                continue     # an explicit decision, never reported as dropped
+            if not cands:
+                dropped.append({"key": ch["key"], "number": ch["number"],
+                               "name": ch["title"],
+                               "reason": "the provider no longer carries a "
+                                         "stream for this channel"})
                 continue
             # An ordered list of streams, not a primary and a fallback.
             # Dispatcharr stores a channel as exactly that -- an ordered
@@ -3144,6 +3190,13 @@ class Handler(BaseHTTPRequestHandler):
                 picked = [c for c in cands
                          if c["status"] in ("ok", "dirty")][:AUTO_FALLBACK_DEPTH]
             if not picked:
+                # Candidates exist, but none of them are playable -- as
+                # invisible on the push as having none at all, and worth
+                # the same signal.
+                dropped.append({"key": ch["key"], "number": ch["number"],
+                               "name": ch["title"],
+                               "reason": "none of this channel's streams are "
+                                         "playable any more"})
                 continue
             primary = picked[0]
             # A channel with no NUMBER is not exportable, and pushing it
@@ -3185,7 +3238,9 @@ class Handler(BaseHTTPRequestHandler):
                        "tvg_id": chan_tvg_id,
                        "streams": picked,
                        "primary": primary, "fallback": fallback})
-        return out
+        # A plain list by default, so every existing caller (three export
+        # formats and the push itself) is untouched by this addition.
+        return (out, dropped) if report_dropped else out
 
     def _export_m3u(self, run_id):
         store = RunStore(self.root, run_id)
@@ -3657,10 +3712,11 @@ class Handler(BaseHTTPRequestHandler):
         store = RunStore(self.root, run_id)
         if not os.path.exists(store.results_path):
             return self._send('{"error":"no such run"}', "application/json", 404)
-        curated = self._resolve_curated(store)
+        curated, dropped = self._resolve_curated(store, report_dropped=True)
         channel_key = (body.get("channel_key") or "").strip()
         if channel_key:
             curated = [c for c in curated if c["key"] == channel_key]
+            dropped = [c for c in dropped if c["key"] == channel_key]
         if not curated:
             return self._send('{"error":"nothing selected"}', "application/json", 400)
 
@@ -3701,6 +3757,17 @@ class Handler(BaseHTTPRequestHandler):
                 client, channels, group_name=group_name,
                 default_group_name=default_group_name,
                 fallback_mode=body.get("fallback_mode") or "native")
+            # Both blocks below need to know what is currently live in the
+            # target, so it is fetched at most once for the pair.
+            by_number = None
+            if dropped or not channel_key:
+                by_number = {c.get("channel_number"): c
+                             for c in client.channels()}
+
+            def present(number):
+                return (float(number) in by_number
+                        if number is not None and by_number is not None else False)
+
             # Staged deletions belong in the same diff as everything else --
             # a preview that shows six updates while quietly omitting the
             # channel about to be destroyed is worse than no preview.
@@ -3708,13 +3775,19 @@ class Handler(BaseHTTPRequestHandler):
             # channel, and silently deleting others alongside it would be
             # the exact surprise this preview exists to prevent.
             if not channel_key:
-                by_number = {c.get("channel_number"): c
-                             for c in client.channels()}
                 result["removals"] = [
                     {"number": r.get("number"), "name": r.get("name"),
-                     "present": (float(r["number"]) in by_number
-                                 if r.get("number") is not None else False)}
+                     "present": present(r.get("number"))}
                     for r in store.read_removals()]
+            # Channels this push is NOT carrying because the provider has
+            # stopped offering a usable stream. Reported, never acted on:
+            # whatever is live in Dispatcharr stays exactly as it is, but
+            # the preview now says so instead of leaving the channel to rot
+            # there unmentioned. `present` distinguishes "still live in
+            # Dispatcharr, now unbacked" from "already gone anyway".
+            if dropped:
+                result["dropped"] = [{**d, "present": present(d.get("number"))}
+                                     for d in dropped]
         except Exception as e:
             return self._send(json.dumps({"error": str(e)[:400]}),
                               "application/json", 502)

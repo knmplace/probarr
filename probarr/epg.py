@@ -46,23 +46,69 @@ def parse_xmltv_time(value):
     return dt.replace(tzinfo=datetime.timezone.utc)
 
 
+class _Chained(io.RawIOBase):
+    """A stream that replays a few already-read bytes, then continues.
+
+    Needed only because gzip has to be detected from the first two bytes of
+    a NON-seekable HTTP response. Reading those two bytes consumes them, and
+    without this they would be lost.
+    """
+
+    def __init__(self, prefix, stream):
+        self._prefix, self._stream = prefix, stream
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        n = 0
+        if self._prefix:
+            n = min(len(b), len(self._prefix))
+            b[:n] = self._prefix[:n]
+            self._prefix = self._prefix[n:]
+            if n == len(b):
+                return n
+        chunk = self._stream.read(len(b) - n)
+        if not chunk:
+            return n
+        b[n:n + len(chunk)] = chunk
+        return n + len(chunk)
+
+    def close(self):
+        try:
+            self._stream.close()
+        finally:
+            super().close()
+
+
 def _open(source, timeout=120):
-    """Open a local path or URL, transparently decompressing gzip.
+    """Open a local path or URL as a STREAM, transparently decompressing gzip.
 
     Detects gzip by magic bytes rather than by '.gz' in the name: these
     aggregator URLs frequently serve gzip from an extensionless path, and
     content-encoding is not reliable either.
+
+    Streams rather than returning BytesIO over the whole document. It used
+    to .read() the entire file into memory and hand back a BytesIO, which
+    put a floor under peak memory equal to the (decompressed) file size --
+    tens of MB per source, before parsing had even started, and the other
+    half of the high-memory report that got this looked at. A real guide is
+    consumed strictly front-to-back by iterparse, so it never needed to be
+    resident all at once.
     """
     if re.match(r"^https?://", source, re.I):
         req = urllib.request.Request(source, headers={"User-Agent": "probarr/0.1",
                                                       "Accept-Encoding": "gzip"})
-        raw = urllib.request.urlopen(req, timeout=timeout).read()
-    else:
-        with open(source, "rb") as f:
-            raw = f.read()
-    if raw[:2] == b"\x1f\x8b":
-        raw = gzip.decompress(raw)
-    return io.BytesIO(raw)
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        head = resp.read(2)
+        stream = io.BufferedReader(_Chained(head, resp))
+        return gzip.GzipFile(fileobj=stream) if head == b"\x1f\x8b" else stream
+    f = open(source, "rb")
+    # Local files are seekable, so sniffing costs nothing and needs no
+    # replay -- just rewind.
+    head = f.read(2)
+    f.seek(0)
+    return gzip.GzipFile(fileobj=f) if head == b"\x1f\x8b" else f
 
 
 class Guide:
@@ -89,46 +135,71 @@ class Guide:
         hi = at + datetime.timedelta(hours=window_hours)
 
         g = cls()
+        # Closed explicitly: _open now returns a real streaming handle
+        # rather than an in-memory BytesIO, so leaking it leaks a file
+        # descriptor on every guide load -- and these are loaded on a TTL,
+        # repeatedly, for the life of the process.
         stream = _open(source, timeout=timeout)
-        # iterparse + clear(): the document is streamed and each element
-        # discarded once consumed, so peak memory stays flat regardless of
-        # file size.
-        for event, elem in ET.iterparse(stream, events=("end",)):
-            tag = elem.tag.lower()
-            if tag == "channel":
-                cid = elem.get("id") or ""
-                names = [(e.text or "").strip()
-                         for e in elem.findall("display-name") if (e.text or "").strip()]
-                if cid and names:
-                    g.display_names.setdefault(cid, []).extend(names)
-                # Only ever used as a FALLBACK when a channel's own M3U
-                # carries no tvg-logo at all -- an XMLTV aggregator's icon
-                # is frequently a generic placeholder or simply absent, so
-                # this is never preferred over what the provider itself
-                # supplied. First one seen wins; a channel id repeated
-                # across feeds in the same file is not expected to disagree
-                # with itself on its own icon.
-                if cid and cid not in g.icons:
-                    icon_el = elem.find("icon")
-                    src = (icon_el.get("src") or "").strip() if icon_el is not None else ""
-                    if src:
-                        g.icons[cid] = src
+        try:
+            # iterparse + clear() + DETACHING from the root. That last part is
+            # the load-bearing bit, and its absence was a real reported bug: in
+            # stdlib ElementTree, elem.clear() empties an element but leaves it
+            # attached to its parent, so the root accumulates one empty element
+            # per <channel> AND per <programme> in the whole file -- including
+            # every programme outside the window that is deliberately discarded.
+            # Measured on a synthetic 63MB guide: 104MB peak to retain 9MB of
+            # useful data, scaling with file size, under a comment that claimed
+            # peak stayed flat. Clearing the root as well takes the identical
+            # parse to 0.3MB. lxml does this by deleting previous siblings;
+            # stdlib has no parent pointer, so the root is cleared instead --
+            # safe here because nothing below reads back a previous element.
+            ctx = ET.iterparse(stream, events=("start", "end"))
+            _, root = next(ctx)
+            for event, elem in ctx:
+                if event != "end":
+                    continue
+                tag = elem.tag.lower()
+                if tag == "channel":
+                    cid = elem.get("id") or ""
+                    names = [(e.text or "").strip()
+                             for e in elem.findall("display-name") if (e.text or "").strip()]
+                    if cid and names:
+                        g.display_names.setdefault(cid, []).extend(names)
+                    # Only ever used as a FALLBACK when a channel's own M3U
+                    # carries no tvg-logo at all -- an XMLTV aggregator's icon
+                    # is frequently a generic placeholder or simply absent, so
+                    # this is never preferred over what the provider itself
+                    # supplied. First one seen wins; a channel id repeated
+                    # across feeds in the same file is not expected to disagree
+                    # with itself on its own icon.
+                    if cid and cid not in g.icons:
+                        icon_el = elem.find("icon")
+                        src = (icon_el.get("src") or "").strip() if icon_el is not None else ""
+                        if src:
+                            g.icons[cid] = src
+                elif tag == "programme":
+                    start = parse_xmltv_time(elem.get("start"))
+                    stop = parse_xmltv_time(elem.get("stop"))
+                    if start and (lo <= start <= hi or (stop and lo <= stop <= hi)):
+                        cid = elem.get("channel") or ""
+                        title_el = elem.find("title")
+                        desc_el = elem.find("desc")
+                        g.programmes.setdefault(cid, []).append((
+                            start, stop,
+                            (title_el.text or "").strip() if title_el is not None else "",
+                            (desc_el.text or "").strip() if desc_el is not None else "",
+                        ))
+                else:
+                    continue
+                # Both branches above are done with this element. Emptying it is
+                # not enough on its own -- it stays in the root's child list --
+                # so the root goes too. See the note at the top of this loop.
                 elem.clear()
-            elif tag == "programme":
-                start = parse_xmltv_time(elem.get("start"))
-                stop = parse_xmltv_time(elem.get("stop"))
-                if start and (lo <= start <= hi or (stop and lo <= stop <= hi)):
-                    cid = elem.get("channel") or ""
-                    title_el = elem.find("title")
-                    desc_el = elem.find("desc")
-                    g.programmes.setdefault(cid, []).append((
-                        start, stop,
-                        (title_el.text or "").strip() if title_el is not None else "",
-                        (desc_el.text or "").strip() if desc_el is not None else "",
-                    ))
-                elem.clear()
-        for cid in g.programmes:
-            g.programmes[cid].sort(key=lambda p: p[0])
+                root.clear()
+            for cid in g.programmes:
+                g.programmes[cid].sort(key=lambda p: p[0])
+        finally:
+            stream.close()
         return g
 
     # -- indexing -----------------------------------------------------------

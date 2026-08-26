@@ -43,7 +43,10 @@ def start_run(root, source, run_id=None, wantlist=None, epg=None,
     # somewhere to report itself. Without this, an unreachable provider URL
     # would raise before a RunStore existed at all, and a web UI polling for
     # progress would have no record to poll and would spin forever.
-    store = RunStore(root, run_id)
+    # The one place a run is genuinely brought into existence, so the one
+    # place that asks for its directories to be made -- see RunStore's own
+    # docstring for why every other (reading) caller must not.
+    store = RunStore(root, run_id, create=True)
     store.write_meta({"source": source.split("?")[0], "provider_name": provider_name,
                       # Which durable lineup this run is a snapshot of, if
                       # any -- what lets curation inherit that lineup's
