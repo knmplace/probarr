@@ -122,10 +122,20 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
    deliberately the same height as .shot (align-items:stretch on .cand
    already gives it that, for free) so it reads as a direct side-by-side,
    not a different-sized afterthought. Width is whatever the crop's own
-   aspect ratio needs, not fixed -- a logo box is rarely 16:9. */
+   aspect ratio needs, not fixed -- a logo box is rarely 16:9.
+   overflow:hidden is load-bearing, not decorative: with no fixed height
+   of its own (only align-items:stretch on .cand giving it one) and an
+   <img> sized purely by height:100%/width:auto, the image's rendered box
+   can disagree with its flex parent's actual computed size -- confirmed
+   live, it visually bled out of its own slot and sat on top of
+   neighbouring candidate text instead of being confined to its column.
+   cursor:zoom-in matches .shot's own affordance now that this is
+   click-to-enlarge too. */
 .cand .wmshot{flex:none;background:#000;display:flex;align-items:center;
-  justify-content:center;border-left:1px solid var(--line)}
-.cand .wmshot img{height:100%;width:auto;max-width:120px;object-fit:contain;display:block}
+  justify-content:center;border-left:1px solid var(--line);overflow:hidden;
+  max-width:140px;cursor:zoom-in}
+.cand .wmshot img{height:100%;width:auto;max-width:100%;max-height:100%;
+  object-fit:contain;display:block}
 .cand .wmshot.wmshot-empty{width:40px}
 .cand .wmshot.wmshot-empty img{display:none}
 .cand .cbody{flex:1;min-width:0;padding:7px 10px;display:flex;flex-direction:column;
@@ -1063,9 +1073,10 @@ function renderDetail(){
             '<div class="pill '+c.status+'">'+c.status+'</div>'+
             (i<9?'<div class="kbd">'+(i+1)+'</div>':'')+
           '</div>'+
-          (s.watermark_box ? '<div class="wmshot" title="The marked watermark '+
-            'area, cropped out of THIS candidate’s own frame — compare it '+
-            'by eye against the screenshot to its left.">'+
+          (s.watermark_box ? '<div class="wmshot" data-zoom-wm="'+esc(c.id)+'" '+
+            'title="The marked watermark area, cropped out of THIS candidate’s '+
+            'own frame — compare it by eye against the screenshot to its left. '+
+            'Click to enlarge.">'+
             '<img loading="lazy" src="/run/'+encodeURIComponent(DATA.run_id)+
             '/watermark?key='+encodeURIComponent(c.id)+'" alt="" '+
             'onerror="this.closest(\'.wmshot\').classList.add(\'wmshot-empty\')">'+
@@ -1155,14 +1166,36 @@ function advance(dir){
 }
 
 // --- lightbox ----------------------------------------------------------
+let lbIsWatermark = false;
 function zoom(id){
   const ch=DATA.channels.find(c=>c.key===current); if(!ch) return;
   const c=(ch.candidates||[]).find(x=>x.id===id); if(!c||!c.frame) return;
-  lbCand=c; lbFull=true; paintLB();
+  lbCand=c; lbFull=true; lbIsWatermark=false;
+  document.getElementById("lbmode").style.display = "";
+  paintLB();
   document.getElementById("lb2").classList.add("on");
 }
+// A watermark crop is one image, not a full-frame/1:1-crop PAIR to toggle
+// between -- reuses the same lightbox chrome (close button, Esc, dark
+// backdrop) rather than building a second one, but skips paintLB()
+// entirely (that function assumes lbCand, which this has no use for) and
+// hides the now-meaningless mode-toggle button instead of leaving it to
+// silently do nothing when clicked.
+function zoomWatermark(id){
+  const ch=DATA.channels.find(c=>c.key===current); if(!ch) return;
+  const c=(ch.candidates||[]).find(x=>x.id===id); if(!c) return;
+  lbIsWatermark = true;
+  const lb=document.getElementById("lb2");
+  lb.querySelector("img").src = "/run/"+encodeURIComponent(DATA.run_id)+
+    "/watermark?key="+encodeURIComponent(id);
+  document.getElementById("lbmode").style.display = "none";
+  document.getElementById("lbcap").textContent =
+    c.name + " \u2014 marked watermark area, enlarged (native pixels upscaled "+
+    "by the browser; a small marked area on a low-resolution frame will look soft)";
+  lb.classList.add("on");
+}
 function paintLB(){
-  if(!lbCand) return;
+  if(!lbCand || lbIsWatermark) return;
   const lb=document.getElementById("lb2");
   const src = lbFull ? lbCand.frame : (lbCand.crop||lbCand.frame);
   lb.querySelector("img").src = src;
@@ -1182,7 +1215,7 @@ document.addEventListener("click", e=>{
   // reselected a different channel.
   const lb=document.getElementById("lb2");
   if(lb.classList.contains("on")){
-    if(e.target.id==="lbmode"){ lbFull=!lbFull; paintLB(); return; }
+    if(e.target.id==="lbmode" && !lbIsWatermark){ lbFull=!lbFull; paintLB(); return; }
     if(e.target.id==="lbclose"){ lb.classList.remove("on"); return; }
     if(e.target.closest(".bar2")) return;
     lb.classList.remove("on");
@@ -1221,6 +1254,8 @@ document.addEventListener("click", e=>{
     }
     select(row.dataset.k); return;
   }
+  const wmshot=e.target.closest("[data-zoom-wm]");
+  if(wmshot){ zoomWatermark(wmshot.dataset.zoomWm); return; }
   const shot=e.target.closest("[data-zoom]");
   if(shot){ zoom(shot.dataset.zoom); return; }
   const btn=e.target.closest("button[data-act]");

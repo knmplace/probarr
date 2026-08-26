@@ -2016,6 +2016,16 @@ class Handler(BaseHTTPRequestHandler):
         out_path = os.path.join(out_dir, f"{RunStore.safe_name(rec_key)}-{box_hash}.jpg")
         if not os.path.isfile(out_path):
             ffmpeg = os.environ.get("PROBARR_FFMPEG", "ffmpeg")
+            # A marked area is often a small fraction of an already
+            # modest-resolution frame -- confirmed live, a ~7%x5% box on a
+            # 704x396 source (a real BBC One candidate, itself a lower-
+            # bitrate DASH rendition, not a bug in the crop) crops down to
+            # 48x20 real pixels, which the browser then enlarges with its
+            # own upscaling to match the row height. That softness is a
+            # property of the source resolution, not something a sharper
+            # filter here can substantively fix -- tried a lanczos upscale
+            # server-side and it wasn't worth the extra step for what it
+            # actually bought. Left as a native-resolution crop.
             crop_expr = f"crop=iw*{w}:ih*{h}:iw*{x}:ih*{y}"
             try:
                 subprocess.run(
