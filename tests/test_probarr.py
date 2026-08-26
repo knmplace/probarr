@@ -2964,6 +2964,10 @@ class TestSettingsPostIsAlsoRedacted(Temp):
         h._json_body = lambda: (
             {"source": "xtream://user:sup3rs3cret@host:8080"}, False)
         h.path = "/api/settings"
+        # Same-origin write guard (probarr-tj0) now runs ahead of every
+        # settings write; a same-origin Referer is what a real browser save
+        # sends, and is what this redaction test needs to get past it.
+        h.headers = {"Host": "127.0.0.1", "Referer": "http://127.0.0.1/settings"}
         return h, sent
 
     def test_the_save_response_does_not_echo_the_raw_credential(self):
