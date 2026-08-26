@@ -755,6 +755,12 @@ const $ = id => document.getElementById(id);
 const KEYS = ["concurrency","gap_seconds","sample_seconds","frame_height",
               "thumb_height","source","epg","wantlist","failover_display",
               "freshness_hours","match_sensitivity"];
+// source/epg come back from GET masked (they may hold live provider
+// credentials) -- track the as-loaded value so an unedited field is left
+// out of the POST body instead of overwriting the real saved secret with
+// the "***" placeholder the operator never actually typed.
+const SECRET_KEYS = ["source","epg"];
+const loadedSecret = {};
 
 function estimate(){
   const c = Math.max(1, parseInt($("concurrency").value||"1",10));
@@ -770,18 +776,27 @@ function estimate(){
 async function load(){
   const d = await (await fetch("/api/settings")).json();
   KEYS.forEach(k => { if($(k)) $(k).value = d[k]; });
+  SECRET_KEYS.forEach(k => { loadedSecret[k] = d[k]; });
   estimate();
 }
 KEYS.forEach(k => { const el=$(k); if(el) el.addEventListener("input", estimate); });
 
 $("save").addEventListener("click", async ()=>{
   const body={};
-  KEYS.forEach(k => { if($(k)) body[k] = $(k).value; });
+  KEYS.forEach(k => {
+    if(!$(k)) return;
+    // Unedited secret field still shows the masked placeholder from GET --
+    // omit it so the write path keeps whatever's actually stored, instead
+    // of clobbering the real credential with the "***" text on screen.
+    if(SECRET_KEYS.includes(k) && $(k).value === loadedSecret[k]) return;
+    body[k] = $(k).value;
+  });
   $("msg").textContent="saving\u2026";
   const r = await fetch("/api/settings", {method:"POST",
     headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
   const d = await r.json();
   KEYS.forEach(k => { if($(k)) $(k).value = d[k]; });
+  SECRET_KEYS.forEach(k => { loadedSecret[k] = d[k]; });
   estimate();
   $("msg").textContent="saved";
   setTimeout(()=>$("msg").textContent="", 1800);
