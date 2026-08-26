@@ -68,6 +68,18 @@ main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
 .epg .ttl{font-size:15px;font-weight:600;margin:2px 0}
 .epg .dsc{color:var(--dim);font-size:12px}
 .epg.none{border-left-color:var(--faint)}
+/* Per-candidate, not the channel-level summary above -- what the guide
+   said was airing at THIS candidate's own probe moment, so the picture
+   can be checked against a guide entry that actually describes when it
+   was taken, not just the channel's first-ranked candidate's. Same
+   left-accent-bar language as .epg, scaled down to sit inline in a
+   candidate row rather than announce itself as its own section. */
+.cand-epg{margin-top:5px;padding:4px 8px;background:var(--bg2);
+  border-left:2px solid var(--accent);border-radius:3px;font-size:11.5px;
+  color:var(--dim);display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+.cand-epg .lbl{color:var(--faint);text-transform:uppercase;font-size:9.5px;
+  letter-spacing:.4px;flex:none}
+.cand-epg .ttl{color:var(--text);font-weight:600}
 .epgnow{margin-top:8px;padding-top:7px;border-top:1px solid var(--line);
   font-size:12px;color:var(--dim);display:flex;flex-direction:column;gap:3px}
 .epgnow .src{color:var(--faint);font-weight:600;min-width:96px;display:inline-block}
@@ -1152,6 +1164,12 @@ function renderDetail(){
           '<div class="cbody"><div class="sname" title="'+esc(c.name)+'">'+esc(c.name)+
             ' <span class="n" style="color:var(--faint)">#'+c.rank+' ranked</span></div>'+
             '<div class="specs">'+specHTML(c, expectedAspect)+'</div>'+
+            (c.expected ? '<div class="cand-epg" title="What the guide said '+
+              'was airing at the moment THIS candidate was probed — '+
+              'compare it against the screenshot to its left.">'+
+              '<span class="lbl">Guide at probe time'+
+              (c.expected.window?' ('+esc(c.expected.window)+')':'')+
+              ':</span><span class="ttl">'+esc(c.expected.title)+'</span></div>' : '')+
             '<div class="actions">'+
               '<button data-act="use">'+(used>=0?"Remove from channel":"+ Add to channel")+'</button>'+
               (c.clip ? '<button data-act="clip" title="Watch the last captured clip">\u25b6</button>' : '')+
@@ -3512,6 +3530,15 @@ def build_payload(by_channel, store, guide_present=False, inherited=None,
                 "dashabr": bool(r.get("dash_multi_bitrate")),
                 "slowfetch": bool(r.get("slow_fetch")),
                 "rank": i + 1,
+                # What the guide said was airing AT THIS CANDIDATE'S OWN
+                # probe moment -- distinct from the channel-level `expected`
+                # above (which is only ever the first ranked candidate's),
+                # because candidates are not all probed at the same instant.
+                # A picture that doesn't match a MISMATCHED channel-level
+                # guide is ambiguous (maybe this candidate was just probed
+                # at a different time); a picture that doesn't match ITS
+                # OWN capture-time guide entry is not.
+                "expected": r.get("expected"),
                 "thumb": _url(store, r.get("thumb"), r.get("probed_at")),
                 "frame": _url(store, r.get("frame"), r.get("probed_at")),
                 "crop": _url(store, r.get("crop"), r.get("probed_at")),
