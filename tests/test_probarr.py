@@ -1223,6 +1223,155 @@ class TestPerProviderStreamLimit(unittest.TestCase):
         self.assertEqual(accounts[0]["max_streams"], 4)
         self.assertEqual(accounts[1]["max_streams"], 4)
 
+    def test_find_account_for_source_never_matches_a_falsy_spec(self):
+        # server_url: None on the shared "custom" account must never be
+        # treated as a match for "no spec known" -- see
+        # find_account_for_source()'s docstring.
+        accounts = [{"id": 1, "name": "custom", "server_url": None, "max_streams": 0}]
+        client, calls = self._client(accounts)
+        self.assertIsNone(client.find_account_for_source(None))
+        self.assertIsNone(client.find_account_for_source(""))
+        self.assertFalse(calls)  # short-circuited before ever hitting the API
+
+    def test_enforce_provider_stream_limit_with_no_spec_is_a_noop(self):
+        accounts = [{"id": 1, "name": "custom", "server_url": None, "max_streams": 0}]
+        client, calls = self._client(accounts)
+        client.enforce_provider_stream_limit(None, 4)
+        self.assertFalse(any(m == "PATCH" for m, *_ in calls))
+
+
+class TestGetOrCreateAccountForSource(unittest.TestCase):
+    """The automated version of docs/design/per-provider-m3u-accounts.md's
+    "step zero" -- creating the real Dispatcharr M3U account a provider
+    needs, instead of that being a manual, by-hand prerequisite.
+    """
+
+    def _client(self, accounts):
+        from probarr.sources.dispatcharr import Dispatcharr
+        c = Dispatcharr("http://x", "u", "p")
+        calls = []
+        created = []
+
+        def fake_api(method, path, body=None):
+            calls.append((method, path, body))
+            if method == "GET" and path == "/api/m3u/accounts/":
+                return accounts
+            if method == "POST" and path == "/api/m3u/accounts/":
+                acct = {"id": 99, **body}
+                created.append(acct)
+                accounts.append(acct)
+                return acct
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        c.api = fake_api
+        return c, calls, created
+
+    def test_creates_an_account_when_none_matches(self):
+        client, calls, created = self._client([])
+        acct = client.get_or_create_account_for_source("https://p.tv/m3u", "mybunny")
+        self.assertEqual(acct["id"], 99)
+        self.assertEqual(created[0]["server_url"], "https://p.tv/m3u")
+        self.assertEqual(created[0]["name"], "mybunny")
+
+    def test_reuses_an_existing_matching_account_without_creating(self):
+        accounts = [{"id": 10, "name": "BunnyCustom",
+                     "server_url": "https://p.tv/m3u", "max_streams": 8}]
+        client, calls, created = self._client(accounts)
+        acct = client.get_or_create_account_for_source("https://p.tv/m3u", "mybunny")
+        self.assertEqual(acct["id"], 10)
+        self.assertFalse(created)
+        self.assertFalse(any(m == "POST" for m, *_ in calls))
+
+    def test_skips_a_non_url_spec_entirely(self):
+        # dispatcharr:// and xtream:// specs have no server_url string a
+        # real M3U account could ever match verbatim -- no-op, not a guess.
+        client, calls, created = self._client([])
+        self.assertIsNone(
+            client.get_or_create_account_for_source("dispatcharr://u:p@host:9191",
+                                                     "mydispatch"))
+        self.assertIsNone(
+            client.get_or_create_account_for_source("xtream://u:p@host:8080", "myx"))
+        self.assertFalse(calls)
+        self.assertFalse(created)
+
+    def test_skips_an_empty_spec(self):
+        client, calls, created = self._client([])
+        self.assertIsNone(client.get_or_create_account_for_source(None, "mybunny"))
+        self.assertIsNone(client.get_or_create_account_for_source("", "mybunny"))
+        self.assertFalse(calls)
+
+    def test_a_create_failure_is_logged_not_raised(self):
+        from probarr import http
+        client, _, _ = self._client([])
+
+        def failing_api(method, path, body=None):
+            if method == "GET" and path == "/api/m3u/accounts/":
+                return []
+            raise http.HttpError(500, "boom")
+
+        client.api = failing_api
+        logged = []
+        result = client.get_or_create_account_for_source(
+            "https://p.tv/m3u", "mybunny", log=logged.append)
+        self.assertIsNone(result)
+        self.assertTrue(logged)
+
+
+class TestRunExportUsesTheSourceProviderSpec(Temp):
+    """web.py's _run_export() used to pass `prov["spec"]` -- the DISPATCHARR
+    connection being pushed INTO -- to enforce_provider_stream_limit() and
+    get_or_create_account_for_source(), both of which match against the
+    ORIGINAL upstream provider's own spec (e.g. mybunny's playlist URL).
+    A dispatcharr:// spec can never equal a real M3U account's server_url,
+    so that call was silently always a no-op. This exercises the fix: the
+    saved SOURCE provider's spec (looked up via meta["provider_name"]) is
+    what actually gets passed.
+    """
+
+    def _run(self, create_account):
+        from probarr import web as web_mod, providers as providers_mod
+        from probarr.store import RunStore
+
+        providers_mod.save(self.root, "mybunny", "https://p.tv/m3u?u=x&p=y")
+        providers_mod.save(self.root, "mydispatch", "dispatcharr://u:p@host:9191")
+
+        store = RunStore(self.root, "run1")
+        store.write_meta({"provider_name": "mybunny", "source": "https://p.tv/m3u",
+                          "concurrency": 2})
+        store.write_push_status({"state": "running", "phase": "resolving",
+                                 "done": 0, "total": 0, "started": 0})
+
+        web_mod.Handler.root = self.root
+        handler = web_mod.Handler.__new__(web_mod.Handler)
+
+        fake_client = unittest.mock.MagicMock()
+        prov = {"name": "mydispatch", "spec": "dispatcharr://u:p@host:9191"}
+
+        with unittest.mock.patch.object(web_mod, "client_from_spec",
+                                        return_value=fake_client), \
+             unittest.mock.patch.object(handler, "_forget_remote_groups"), \
+             unittest.mock.patch.object(handler, "_apply_removals", return_value=[]), \
+             unittest.mock.patch.object(handler, "_resolve_epg_overrides",
+                                        return_value=({}, set())), \
+             unittest.mock.patch.object(web_mod, "dispatcharr_export") as fake_export:
+            fake_export.push.return_value = {}
+            handler._run_export(store, prov, "mydispatch", [], "native",
+                               None, "probarr", prune_empty=True,
+                               apply_removals=False, create_account=create_account)
+
+        return fake_client
+
+    def test_enforce_provider_stream_limit_gets_the_source_spec_not_the_target(self):
+        client = self._run(create_account=False)
+        client.enforce_provider_stream_limit.assert_called_once_with(
+            "https://p.tv/m3u?u=x&p=y", 2, log=unittest.mock.ANY)
+        client.get_or_create_account_for_source.assert_not_called()
+
+    def test_create_account_opt_in_also_uses_the_source_spec(self):
+        client = self._run(create_account=True)
+        client.get_or_create_account_for_source.assert_called_once_with(
+            "https://p.tv/m3u?u=x&p=y", "mybunny", log=unittest.mock.ANY)
+
 
 class TestReferenceLineups(Temp):
     def _fake_response(self, payload):
