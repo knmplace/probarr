@@ -63,7 +63,9 @@ aside .tools input[type=search]{width:100%}
 .chan .cnt{color:var(--faint);font-size:11px;font-variant-numeric:tabular-nums}
 main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
 .dhead{margin-bottom:12px}
-.dhead h1{margin:0 0 4px;font-size:20px}
+.dhead h1{margin:0 0 4px;font-size:20px;display:flex;align-items:center;gap:10px}
+.dhlogo{height:34px;width:34px;object-fit:contain;flex:none;background:var(--bg2);
+  border-radius:5px}
 #titletext{cursor:pointer;border-bottom:1px dashed transparent}
 #titletext:hover{border-bottom-color:var(--faint)}
 #titleedit{background:none;border:0;color:var(--faint);cursor:pointer;font-size:14px;
@@ -1120,8 +1122,10 @@ function renderDetail(){
       ? (s.include !== false ? 'Exclude ('+MARKED.size+')' : 'Re-include ('+MARKED.size+')')
       : (s.include !== false ? 'Exclude this channel' : 'Re-include this channel'))+
     '</button>';
+  const dLogoUrl = listLogo(ch);
   d.innerHTML =
     '<div class="dhead"><h1>'+(ch.number!=null?ch.number+' &middot; ':'')+
+      (dLogoUrl ? '<img class="dhlogo" src="'+esc(dLogoUrl)+'" alt="">' : '')+
       '<span id="titletext" tabindex="0" title="Click to rename">'+esc(ch.title)+'</span>'+
       '<button id="titleedit" title="Rename this channel">\u270e</button></h1>'+
       '<div class="sub">'+esc(ch.why||"")+
