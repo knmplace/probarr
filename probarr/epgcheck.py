@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 import urllib.request
 
@@ -102,6 +103,30 @@ def _display_clean(name):
 _CACHE_TTL = 600
 _cache = {}  # url -> (Guide, loaded_at)
 
+# KNM fix (probarr-vz7): Curate's per-channel "what's on now" badge fires
+# one _epg_check per channel on page load, concurrently -- a 6-channel
+# lineup means 6 threads calling load_cached() for the SAME url at once.
+# Without a lock, every one of them sees the same cold/expired cache entry
+# and independently downloads and parses the multi-MB feed in parallel:
+# confirmed live, six threads simultaneously inside ElementTree parsing
+# (py-spy dump), pegging the container at 100%+ CPU for the full duration
+# instead of one parse with five callers waiting on it. Keyed per-url so
+# different sources still warm concurrently -- only same-url callers
+# should serialize.
+_locks = {}
+_locks_guard = threading.Lock()
+
+
+def _lock_for(url):
+    # RLock, not Lock: _indexed_guide() holds this lock across its own call
+    # into load_cached(), which takes the same per-url lock again on the
+    # same thread -- a plain Lock would deadlock there.
+    with _locks_guard:
+        lock = _locks.get(url)
+        if lock is None:
+            lock = _locks[url] = threading.RLock()
+        return lock
+
 # How long a downloaded XMLTV file is reused from disk. Deliberately hours,
 # not minutes: a real aggregator rate-limits downloads (open-epg allows 20
 # per file per day and returns an HTML "download limit reached" page after
@@ -157,15 +182,26 @@ def load_cached(url, window_hours=6, root=None):
     window_hours is deliberately narrow (vs runner.py's 48h probing window)
     -- this only ever needs to answer "what's on right now", so there is no
     reason to parse or hold two days of programmes in memory for it.
+
+    KNM fix (probarr-vz7): locked per-url. Curate's per-channel "what's on
+    now" badge fires one call per channel on page load, concurrently -- a
+    6-channel lineup means 6 threads calling this for the SAME url at once.
+    Without the lock, every one of them sees the same cold/expired entry
+    and independently downloads and parses the multi-MB feed in parallel
+    (confirmed live: six threads simultaneously inside ElementTree parsing,
+    container pegged at 100%+ CPU for the duration). The lock makes the
+    first caller do the real work and the rest wait for it, then reuse it
+    -- one parse instead of six.
     """
-    now = time.time()
-    hit = _cache.get(url)
-    if hit and (now - hit[1]) < _CACHE_TTL:
-        return hit[0]
-    src = _fetch_to_disk(root, url) if root else url
-    g = Guide.load(src, window_hours=window_hours)
-    _cache[url] = (g, now)
-    return g
+    with _lock_for(url):
+        now = time.time()
+        hit = _cache.get(url)
+        if hit and (now - hit[1]) < _CACHE_TTL:
+            return hit[0]
+        src = _fetch_to_disk(root, url) if root else url
+        g = Guide.load(src, window_hours=window_hours)
+        _cache[url] = (g, now)
+        return g
 
 
 # The Guide object itself is cached, but its name index is a normalised
@@ -178,14 +214,19 @@ _indexed = {}   # url -> (aliases signature, indexed Guide)
 
 
 def _indexed_guide(url, normalizer, root):
-    g = load_cached(url, root=root)
-    sig = tuple(sorted(normalizer.aliases.items()))
-    hit = _indexed.get(url)
-    if hit and hit[0] == sig and hit[1] is g:
+    # Same per-url serialization as load_cached, and for the same reason:
+    # build_name_index() walks every channel in the guide and is real cost
+    # on a 6,000-entry feed, so concurrent callers should wait for the
+    # first index rather than each redoing it.
+    with _lock_for(url):
+        g = load_cached(url, root=root)
+        sig = tuple(sorted(normalizer.aliases.items()))
+        hit = _indexed.get(url)
+        if hit and hit[0] == sig and hit[1] is g:
+            return g
+        g.build_name_index(normalizer)
+        _indexed[url] = (sig, g)
         return g
-    g.build_name_index(normalizer)
-    _indexed[url] = (sig, g)
-    return g
 
 
 def search_source(root, source_name, query, normalizer, limit=25):

@@ -1579,6 +1579,328 @@ class TestEpgList(Temp):
         self.assertEqual(names, ["4Seven", "5Star"])
 
 
+class TestEpgCacheStampede(Temp):
+    """KNM fix (probarr-vz7): concurrent callers for the same EPG source URL
+    used to each independently re-download/re-parse the guide -- confirmed
+    live via py-spy as six threads simultaneously inside ElementTree
+    parsing, pegging the container at 100%+ CPU. load_cached() and
+    _indexed_guide() now serialize per-url so only the first caller does the
+    real work and the rest reuse it. These tests prove that directly: spin
+    up N concurrent callers for the same url and assert the expensive work
+    (Guide.load) ran once, not N times.
+    """
+
+    def _guide_xml(self):
+        # A plain filesystem path, not a file:// URL -- Guide.load/_open
+        # accepts either, and file:// URLs don't round-trip through
+        # url2pathname on Windows (a separate, pre-existing, unrelated bug).
+        xml = os.path.join(self.root, "guide.xml")
+        with open(xml, "w", encoding="utf-8") as f:
+            f.write('<?xml version="1.0"?><tv>'
+                    '<channel id="c1"><display-name>BBC One</display-name></channel>'
+                    '</tv>')
+        return xml
+
+    def test_concurrent_load_cached_calls_parse_the_guide_only_once(self):
+        import threading
+        from probarr import epgcheck
+
+        epgcheck._cache.clear()
+        epgcheck._locks.clear()
+        url = self._guide_xml()
+
+        real_load = epgcheck.Guide.load
+        call_count = []
+        start_gate = threading.Event()
+
+        def slow_load(*args, **kwargs):
+            # Force real overlap: every thread reaches this before any of
+            # them returns, so a missing lock would show up as call_count > 1.
+            call_count.append(1)
+            start_gate.wait(timeout=5)
+            return real_load(*args, **kwargs)
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                results.append(epgcheck.load_cached(url, root=None))
+            except Exception as e:
+                errors.append(e)
+
+        with unittest.mock.patch.object(epgcheck.Guide, "load", side_effect=slow_load):
+            threads = [threading.Thread(target=worker) for _ in range(6)]
+            for t in threads:
+                t.start()
+            # Give every thread a chance to reach the lock before releasing
+            # the first one through the parse -- proves they actually
+            # serialized rather than just happening to run in order.
+            import time as _time
+            _time.sleep(0.2)
+            start_gate.set()
+            for t in threads:
+                t.join(timeout=5)
+
+        self.assertEqual(len(errors), 0, errors)
+        self.assertEqual(len(results), 6)
+        self.assertEqual(call_count, [1],
+                          "Guide.load should run exactly once for 6 concurrent "
+                          "callers of the same url -- the rest must reuse the "
+                          "cached result instead of each re-parsing")
+        # All 6 threads got back the same Guide instance from the cache.
+        self.assertTrue(all(g is results[0] for g in results))
+
+    def test_concurrent_indexed_guide_calls_build_the_index_only_once(self):
+        import threading
+        from probarr import epgcheck
+        from probarr.normalize import Normalizer
+
+        epgcheck._cache.clear()
+        epgcheck._locks.clear()
+        epgcheck._indexed.clear()
+        url = self._guide_xml()
+        normalizer = Normalizer()
+
+        real_build = epgcheck.Guide.build_name_index
+        call_count = []
+        start_gate = threading.Event()
+
+        def slow_build(self_guide, *args, **kwargs):
+            call_count.append(1)
+            start_gate.wait(timeout=5)
+            return real_build(self_guide, *args, **kwargs)
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                results.append(epgcheck._indexed_guide(url, normalizer, None))
+            except Exception as e:
+                errors.append(e)
+
+        with unittest.mock.patch.object(epgcheck.Guide, "build_name_index", slow_build):
+            threads = [threading.Thread(target=worker) for _ in range(6)]
+            for t in threads:
+                t.start()
+            import time as _time
+            _time.sleep(0.2)
+            start_gate.set()
+            for t in threads:
+                t.join(timeout=5)
+
+        self.assertEqual(len(errors), 0, errors)
+        self.assertEqual(len(results), 6)
+        self.assertEqual(call_count, [1],
+                          "build_name_index should run exactly once for 6 "
+                          "concurrent callers of the same url")
+
+
+class TestExpectedNowHonoursExplicitEpgSource(Temp):
+    """Real bug report: after explicitly picking a different EPG source for
+    a channel in Check EPG, diagnosing that channel still captured the OLD
+    source's programme as `expected`. Root cause -- _expected_now() only
+    ever walked every saved source in list order and took whichever matched
+    first, blind to the channel's own selection.json pick. Everywhere else
+    an explicit epg_source is honoured (the live Check EPG panel, the
+    actual Dispatcharr push via _resolve_epg_overrides()); this is the one
+    place that silently wasn't.
+    """
+
+    def _guide(self, name, channel_name, programme_title):
+        import datetime
+        xml = os.path.join(self.root, name + ".xml")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        start = (now - datetime.timedelta(minutes=30)).strftime("%Y%m%d%H%M%S +0000")
+        stop = (now + datetime.timedelta(minutes=30)).strftime("%Y%m%d%H%M%S +0000")
+        body = (f'<channel id="c1"><display-name>{channel_name}</display-name></channel>'
+               f'<programme channel="c1" start="{start}" stop="{stop}">'
+               f'<title>{programme_title}</title></programme>')
+        with open(xml, "w", encoding="utf-8") as f:
+            f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
+        from probarr import epgsources
+        epgsources.save(self.root, name, "file://" + xml)
+
+    def _record(self):
+        return {"channel_key": "NATGEO", "stream_name": "National Geographic",
+                "tvg_id": ""}
+
+    def test_falls_back_to_the_first_saved_source_with_no_explicit_pick(self):
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+        web_mod.Handler.root = self.root
+        self._guide("aaa-old", "National Geographic", "Old Programme")
+        self._guide("zzz-new", "National Geographic", "New Programme")
+        store = RunStore(self.root, "run1")
+        got = web_mod.Handler._expected_now(self._record(), store)
+        self.assertEqual(got["title"], "Old Programme")
+
+    def test_an_explicitly_picked_source_wins_even_when_listed_second(self):
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+        web_mod.Handler.root = self.root
+        self._guide("aaa-old", "National Geographic", "Old Programme")
+        self._guide("zzz-new", "National Geographic", "New Programme")
+        store = RunStore(self.root, "run1")
+        store.write_selection({"NATGEO": {"epg_source": "zzz-new"}})
+        got = web_mod.Handler._expected_now(self._record(), store)
+        self.assertEqual(got["title"], "New Programme")
+
+    def test_falls_back_when_the_picked_source_does_not_match_this_channel(self):
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+        web_mod.Handler.root = self.root
+        self._guide("aaa-old", "National Geographic", "Old Programme")
+        self._guide("zzz-new", "Some Other Channel", "New Programme")
+        store = RunStore(self.root, "run1")
+        store.write_selection({"NATGEO": {"epg_source": "zzz-new"}})
+        got = web_mod.Handler._expected_now(self._record(), store)
+        self.assertEqual(got["title"], "Old Programme")
+
+
+class TestWatermarkCrop(Temp):
+    """A channel nobody has marked a watermark area for must trigger NO
+    work at all, not even a fast local one -- the whole point raised when
+    this was scoped. _watermark_crop() is the only place cropping ever
+    happens, so its 404-with-no-box behaviour IS the entire enforcement.
+    """
+
+    def _handler(self):
+        from probarr import web as web_mod
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        sent = []
+        h._send = lambda body, ctype="text/plain", code=200: sent.append(
+            (code, ctype, body))
+        h._file = lambda run_id, rest: sent.append(("FILE", rest)) or sent
+        return h, sent
+
+    def test_no_watermark_box_is_a_404_and_never_touches_the_frame(self):
+        from probarr.store import RunStore
+        import unittest.mock
+        store = RunStore(self.root, "run1")
+        store.write_selection({"BBCONE": {"group": "News"}})  # no watermark_box
+        h, sent = self._handler()
+        with unittest.mock.patch("probarr.web.subprocess") as fake_subprocess:
+            h._watermark_crop("run1", "BBCONE|s1")
+            fake_subprocess.run.assert_not_called()
+        self.assertEqual(sent[0][0], 404)
+
+    def test_missing_frame_file_is_a_404(self):
+        from probarr.store import RunStore
+        store = RunStore(self.root, "run1")
+        store.write_selection({"BBCONE": {"watermark_box":
+                               {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.1}}})
+        h, sent = self._handler()
+        # frame_path exists on disk for no candidate here -- 404, not a crash.
+        h._watermark_crop("run1", "BBCONE|s1")
+        self.assertEqual(sent[0][0], 404)
+
+    def test_crops_the_existing_frame_and_serves_the_result(self):
+        from probarr.store import RunStore
+        import unittest.mock
+        store = RunStore(self.root, "run1")
+        store.write_selection({"BBCONE": {"watermark_box":
+                               {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.1}}})
+        frame_path = store.frame_path("BBCONE|s1")
+        os.makedirs(os.path.dirname(frame_path), exist_ok=True)
+        with open(frame_path, "wb") as f:
+            f.write(b"not a real jpeg, ffmpeg is mocked")
+        h, sent = self._handler()
+        with unittest.mock.patch("probarr.web.subprocess") as fake_subprocess:
+            fake_subprocess.CalledProcessError = Exception
+            fake_subprocess.TimeoutExpired = Exception
+
+            def fake_run(cmd, **kw):
+                # Simulate ffmpeg actually writing the output file.
+                out_path = cmd[-1]
+                with open(out_path, "wb") as f:
+                    f.write(b"cropped")
+            fake_subprocess.run.side_effect = fake_run
+            h._watermark_crop("run1", "BBCONE|s1")
+            fake_subprocess.run.assert_called_once()
+        self.assertEqual(sent[0][0], "FILE")
+        self.assertEqual(sent[0][1][0], "watermarks")
+        self.assertTrue(sent[0][1][1].startswith(
+            RunStore.safe_name("BBCONE|s1")))
+
+    def test_redrawing_the_box_produces_a_different_cached_filename(self):
+        from probarr.store import RunStore
+        import unittest.mock
+        store = RunStore(self.root, "run1")
+        frame_path = store.frame_path("BBCONE|s1")
+        os.makedirs(os.path.dirname(frame_path), exist_ok=True)
+        with open(frame_path, "wb") as f:
+            f.write(b"x")
+
+        def crop_with(box):
+            store.write_selection({"BBCONE": {"watermark_box": box}})
+            h, sent = self._handler()
+            with unittest.mock.patch("probarr.web.subprocess") as fake_subprocess:
+                fake_subprocess.CalledProcessError = Exception
+                fake_subprocess.TimeoutExpired = Exception
+                def fake_run(cmd, **kw):
+                    with open(cmd[-1], "wb") as f:
+                        f.write(b"x")
+                fake_subprocess.run.side_effect = fake_run
+                h._watermark_crop("run1", "BBCONE|s1")
+            return sent[0][1][1]
+
+        name_a = crop_with({"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.1})
+        name_b = crop_with({"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.1})
+        self.assertNotEqual(name_a, name_b)
+
+    def test_a_re_probed_frame_invalidates_the_cached_crop_even_with_the_same_box(self):
+        # Real bug, caught live: a candidate re-probed after its watermark
+        # crop was already cached kept serving the OLD crop indefinitely --
+        # "the file already exists" was the only check, so a completely
+        # different picture underneath the same unchanged box never got
+        # noticed. The box's own hash only invalidates when the MARKED
+        # AREA changes; a re-probe changes the PICTURE, not the area.
+        import time
+        import unittest.mock
+        from probarr.store import RunStore
+
+        store = RunStore(self.root, "run1")
+        store.write_selection({"BBCONE": {"watermark_box":
+                               {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.1}}})
+        frame_path = store.frame_path("BBCONE|s1")
+        os.makedirs(os.path.dirname(frame_path), exist_ok=True)
+
+        def do_crop(marker):
+            with open(frame_path, "wb") as f:
+                f.write(marker)
+            h, sent = self._handler()
+            with unittest.mock.patch("probarr.web.subprocess") as fake_subprocess:
+                fake_subprocess.CalledProcessError = Exception
+                fake_subprocess.TimeoutExpired = Exception
+                def fake_run(cmd, **kw):
+                    # A real crop's bytes are derived from the source frame;
+                    # standing in for that here with the same marker so the
+                    # test can tell "regenerated from the new frame" apart
+                    # from "served the stale cached file" by content, not
+                    # just by whether ffmpeg was invoked.
+                    with open(cmd[-1], "wb") as f:
+                        f.write(marker)
+                fake_subprocess.run.side_effect = fake_run
+                h._watermark_crop("run1", "BBCONE|s1")
+            out_name = sent[0][1][1]
+            with open(os.path.join(store.dir, "watermarks", out_name), "rb") as f:
+                return f.read()
+
+        first = do_crop(b"original broadcast frame")
+        self.assertEqual(first, b"original broadcast frame")
+
+        # The frame file's mtime must genuinely be newer than the cached
+        # crop's for this to be a fair test of the staleness check, not an
+        # accident of both happening within the same filesystem-timestamp
+        # tick.
+        time.sleep(1.05)
+        second = do_crop(b"re-probed, totally different content")
+        self.assertEqual(second, b"re-probed, totally different content")
+
+
 class TestEpgSourceConsensus(Temp):
     """probarr never scored EPG matches against each other or read a
     guide's own <icon> at all -- both real gaps, not different approaches
