@@ -36,6 +36,9 @@ aside .tools input[type=search]{width:100%}
 .chan:hover{background:var(--panel)}
 .chan.sel{background:var(--panel2);box-shadow:inset 3px 0 0 var(--accent)}
 .chan .num{color:var(--faint);font-size:11px;min-width:30px;font-variant-numeric:tabular-nums}
+.chlogo{height:18px;width:18px;object-fit:contain;flex:none;background:var(--bg);
+  border-radius:3px}
+.chlogo-empty{visibility:hidden}
 .chan .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chan.missing .nm{color:var(--faint);font-style:italic}
 .chan.marked{background:rgba(53,197,240,.10);box-shadow:inset 3px 0 0 var(--dup)}
@@ -933,20 +936,34 @@ function renderChips(){
     ' '+(counts[k]||0)+'</span>').join("");
 }
 
+// Same precedence _resolve_curated() uses server-side for export, minus
+// the live EPG-source fallback -- that needs a network round trip per
+// channel and this renders the entire (possibly hundreds-long) list on
+// every filter/search keystroke, so it's deliberately just the two cheap,
+// already-in-memory sources. A channel with neither shows no thumbnail
+// rather than a broken-image icon.
+function listLogo(ch){
+  const sel = SEL[ch.key] || {};
+  return sel.logo_override || (ch.candidates||[]).map(c=>c.logo).find(Boolean) || "";
+}
 function renderList(){
   const list=visible();
-  document.getElementById("chanlist").innerHTML = list.length ? list.map(ch=>
-    '<div class="chan'+(current===ch.key?' sel':'')+(ch.missing?' missing':'')+
+  document.getElementById("chanlist").innerHTML = list.length ? list.map(ch=>{
+    const logoUrl = listLogo(ch);
+    return '<div class="chan'+(current===ch.key?' sel':'')+(ch.missing?' missing':'')+
     (MARKED.has(ch.key)?' marked':'')+'" data-k="'+esc(ch.key)+'">'+
       '<span class="dot '+state(ch)+'"></span>'+
       '<span class="num">'+(ch.number!=null?ch.number:"")+'</span>'+
+      (logoUrl ? '<img class="chlogo" src="'+esc(logoUrl)+'" alt="" loading="lazy">'
+               : '<span class="chlogo chlogo-empty"></span>')+
       '<span class="nm">'+esc(ch.title)+
         (ch.dispatcharr?'<span class="dpip" title="imported from Dispatcharr">D</span>':'')+
         ((ch.changes||[]).length ? '<span class="chpip" title="'+
           esc(ch.changes.join(" \u00b7 "))+'">changed</span>' : '')+
         '</span>'+
       '<span class="cnt">'+(ch.missing?"\u2014":(ch.candidates||[]).length)+'</span>'+
-    '</div>').join("")
+    '</div>';
+  }).join("")
     : (filter==="triage"
         ? '<div class="empty">Nothing needs you.<div class="hint">Every channel '+
           'has a clean pick the ranking is confident about. Switch to '+
@@ -2640,6 +2657,7 @@ function pickLogo(url){
   const ch = DATA.channels.find(c=>c.key===current);
   renderLogoSection(ch, epgSourcesCache || []);
   renderDetail();
+  renderList();   // the sidebar's own logo thumbnail needs the same pick
 }
 let epgSourcesCache = null;
 document.getElementById("em-logo-choices").addEventListener("click", (e) => {
