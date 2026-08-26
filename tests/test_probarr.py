@@ -2127,17 +2127,29 @@ class TestBackup(Temp):
     def test_refuses_a_path_traversal_member(self):
         import io
         import tarfile
+        import uuid
         from probarr import backup as backup_mod
+        # A marker name unique to this run, NOT a real system path. The
+        # original version escaped to "../../etc/passwd" and then asserted
+        # that path did not exist -- which on Linux resolves to the real
+        # /etc/passwd and is therefore always true-ish in the wrong
+        # direction: the assertion failed on any host whose temp dir sits
+        # two levels down (/tmp/xxx), and "passed" on macOS only because
+        # its temp dirs are nested deeper. It never tested the property it
+        # claimed. Caught by CI the first time the suite was made blocking.
+        marker = f"probarr-traversal-{uuid.uuid4().hex}.txt"
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            info = tarfile.TarInfo(name="../../etc/passwd")
+            info = tarfile.TarInfo(name=f"../../{marker}")
             payload = b"pwned"
             info.size = len(payload)
             tar.addfile(info, io.BytesIO(payload))
         with self.assertRaises(ValueError):
             backup_mod.import_tar(self.root, buf.getvalue())
-        # And nothing was written outside root as a side effect of the attempt.
-        self.assertFalse(os.path.exists(os.path.join(self.root, "..", "..", "etc", "passwd")))
+        # Nothing written outside root as a side effect of the attempt.
+        escaped = os.path.abspath(os.path.join(self.root, "..", "..", marker))
+        self.assertFalse(os.path.exists(escaped),
+                         f"a traversal member escaped to {escaped}")
 
 
 class TestAliases(Temp):
