@@ -49,20 +49,54 @@ def parse_xmltv_time(value):
 def _open(source, timeout=120):
     """Open a local path or URL, transparently decompressing gzip.
 
+    Streams throughout: the caller (iterparse) pulls bytes as it parses
+    rather than the whole file/response being buffered in memory up front,
+    which matters for aggregated XMLTV feeds that can run into the
+    gigabytes uncompressed.
+
     Detects gzip by magic bytes rather than by '.gz' in the name: these
     aggregator URLs frequently serve gzip from an extensionless path, and
-    content-encoding is not reliable either.
+    content-encoding is not reliable either. Magic-byte detection needs the
+    first two bytes, so we peek them via a small buffered read and
+    reconstruct a stream that still yields those bytes first.
     """
     if re.match(r"^https?://", source, re.I):
         req = urllib.request.Request(source, headers={"User-Agent": "probarr/0.1",
                                                       "Accept-Encoding": "gzip"})
-        raw = urllib.request.urlopen(req, timeout=timeout).read()
+        raw = urllib.request.urlopen(req, timeout=timeout)
     else:
-        with open(source, "rb") as f:
-            raw = f.read()
-    if raw[:2] == b"\x1f\x8b":
-        raw = gzip.decompress(raw)
-    return io.BytesIO(raw)
+        raw = open(source, "rb")
+    head = raw.read(2)
+    stream = io.BufferedReader(_ChainedStream(head, raw))
+    if head == b"\x1f\x8b":
+        return gzip.GzipFile(fileobj=stream)
+    return stream
+
+
+class _ChainedStream(io.RawIOBase):
+    """A raw stream that yields `head` before continuing to read `tail`."""
+
+    def __init__(self, head, tail):
+        self._head = head
+        self._tail = tail
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        if self._head:
+            n = min(len(b), len(self._head))
+            b[:n] = self._head[:n]
+            self._head = self._head[n:]
+            return n
+        data = self._tail.read(len(b))
+        n = len(data)
+        b[:n] = data
+        return n
+
+    def close(self):
+        self._tail.close()
+        super().close()
 
 
 class Guide:
@@ -90,10 +124,28 @@ class Guide:
 
         g = cls()
         stream = _open(source, timeout=timeout)
-        # iterparse + clear(): the document is streamed and each element
-        # discarded once consumed, so peak memory stays flat regardless of
-        # file size.
-        for event, elem in ET.iterparse(stream, events=("end",)):
+        try:
+            g._parse(stream, lo, hi)
+        finally:
+            stream.close()
+        for cid in g.programmes:
+            g.programmes[cid].sort(key=lambda p: p[0])
+        return g
+
+    def _parse(self, stream, lo, hi):
+        # iterparse + clear() only empties an element's own text/children --
+        # it stays attached to its parent (the root), so the root's child
+        # list would otherwise grow by one stub per channel/programme ever
+        # seen. We track the root via the "start" event and explicitly
+        # remove each element from it once consumed, so peak memory stays
+        # flat regardless of file size.
+        g = self
+        root = None
+        for event, elem in ET.iterparse(stream, events=("start", "end")):
+            if event == "start":
+                if root is None:
+                    root = elem
+                continue
             tag = elem.tag.lower()
             if tag == "channel":
                 cid = elem.get("id") or ""
@@ -114,6 +166,8 @@ class Guide:
                     if src:
                         g.icons[cid] = src
                 elem.clear()
+                if elem is not root and root is not None:
+                    root.remove(elem)
             elif tag == "programme":
                 start = parse_xmltv_time(elem.get("start"))
                 stop = parse_xmltv_time(elem.get("stop"))
@@ -127,9 +181,8 @@ class Guide:
                         (desc_el.text or "").strip() if desc_el is not None else "",
                     ))
                 elem.clear()
-        for cid in g.programmes:
-            g.programmes[cid].sort(key=lambda p: p[0])
-        return g
+                if elem is not root and root is not None:
+                    root.remove(elem)
 
     # -- indexing -----------------------------------------------------------
     def build_name_index(self, normalizer):

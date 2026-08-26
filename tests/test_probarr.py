@@ -9,6 +9,8 @@ actually shipped more than once.
 
     python3 -m unittest discover -s tests -v
 """
+import datetime
+import io
 import json
 import os
 import re
@@ -17,11 +19,12 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
+import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from probarr import aliases as aliases_mod
-from probarr import curate, lineups, pages, providers, settings, wantlist as wl
+from probarr import curate, epg, lineups, pages, providers, settings, wantlist as wl
 from probarr.normalize import Normalizer, group_candidates, declared_quality_rank
 from probarr.rank import rank
 from probarr.sources import m3u
@@ -1857,6 +1860,86 @@ class TestPageTemplates(unittest.TestCase):
         for name, html in self._pages().items():
             self.assertEqual(html.count("<script>"), html.count("</script>"),
                              f"{name} has an unbalanced script tag")
+
+
+class TestEpgMemory(unittest.TestCase):
+    """probarr-6qy: a large XMLTV feed should not blow up memory.
+
+    _open() must stream the source into iterparse rather than reading the
+    whole payload into a bytes object first, and Guide.load()'s iterparse
+    loop must not let the tree root accumulate an ever-growing list of
+    emptied child stubs -- elem.clear() alone does not do that.
+    """
+
+    def _write_xmltv(self, path, n_channels=50, n_programmes=500):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n')
+            for i in range(n_channels):
+                f.write(f'<channel id="ch{i}"><display-name>Ch {i}'
+                        f'</display-name></channel>\n')
+            at = datetime.datetime.now(datetime.timezone.utc)
+            for i in range(n_programmes):
+                start = at + datetime.timedelta(minutes=i)
+                stop = start + datetime.timedelta(minutes=1)
+                cid = f"ch{i % n_channels}"
+                f.write(
+                    f'<programme start="{start.strftime("%Y%m%d%H%M%S +0000")}" '
+                    f'stop="{stop.strftime("%Y%m%d%H%M%S +0000")}" channel="{cid}">'
+                    f'<title>Show {i}</title></programme>\n')
+            f.write("</tv>\n")
+
+    def test_open_does_not_buffer_whole_file_before_parsing(self):
+        # A local file source should stream from disk, not front-load the
+        # entire contents into a single in-memory bytes/BytesIO copy sized
+        # to the file. We check this via the object _open() hands back:
+        # it must not be a BytesIO holding the full raw bytes.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "guide.xml")
+            self._write_xmltv(path)
+            size_on_disk = os.path.getsize(path)
+            stream = epg._open(path)
+            try:
+                self.assertNotIsInstance(
+                    stream, io.BytesIO,
+                    "_open() should stream from disk, not buffer the full "
+                    "file into a BytesIO before iterparse ever starts")
+            finally:
+                stream.close()
+            self.assertGreater(size_on_disk, 0)
+
+    def test_load_does_not_retain_ancestor_stubs_for_every_element(self):
+        # elem.clear() only empties the current element -- it does not
+        # detach it from its parent. Guide.load() must actively drop
+        # processed children from the tree root (or otherwise avoid
+        # accumulating one stub per channel/programme ever seen), or peak
+        # memory grows without bound on a large aggregated feed. We patch
+        # ET.iterparse to snoop on the root's child count as Guide.load()
+        # runs its real loop.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "guide.xml")
+            self._write_xmltv(path, n_channels=20, n_programmes=2000)
+
+            real_iterparse = ET.iterparse
+            max_root_children = []
+
+            def spying_iterparse(source, events=()):
+                root = []
+                for event, elem in real_iterparse(source, events=events):
+                    if event == "start" and not root:
+                        root.append(elem)
+                    if root:
+                        max_root_children.append(len(root[0]))
+                    yield event, elem
+
+            with unittest.mock.patch.object(epg.ET, "iterparse", spying_iterparse):
+                g = epg.Guide.load(path)
+
+            self.assertLess(
+                max(max_root_children), 2020,
+                "Guide.load() leaves an empty stub on the tree root for "
+                "every channel/programme element it has ever consumed -- "
+                "elem.clear() alone doesn't detach it from its parent")
+            self.assertGreater(len(g.programmes), 0)
 
 
 if __name__ == "__main__":
