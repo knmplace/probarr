@@ -639,6 +639,14 @@ __TOPBAR__
     <div class="sub" id="wm-nopic" style="display:none">No captured frame to
       draw on yet for this channel &mdash; probe or diagnose a candidate
       first, then come back here.</div>
+    <div class="mfield" id="wm-picker-field" style="display:none">
+      <label>Picture to draw on</label>
+      <div class="sub" style="margin:-2px 0 6px">Defaults to the best-ranked
+        candidate with a captured frame &mdash; switch if THIS one happens to
+        be a moment the watermark faded off, or you'd rather use a different
+        candidate's picture as the known-good reference.</div>
+      <select id="wm-picker"></select>
+    </div>
     <div id="wm-imgwrap" style="position:relative;display:inline-block;
       max-width:100%;line-height:0;cursor:crosshair">
       <img id="wm-img" style="max-width:100%;display:block" draggable="false">
@@ -2547,23 +2555,45 @@ function openWatermarkModal(){
   const wrap = document.getElementById("wm-imgwrap");
   const boxEl = document.getElementById("wm-box");
   const saveBtn = document.getElementById("wm-save");
+  const pickerField = document.getElementById("wm-picker-field");
+  const picker = document.getElementById("wm-picker");
   document.getElementById("wm-result").className = "mresult";
   boxEl.style.display = "none";
   saveBtn.disabled = true;
   WM_DRAG = null; WM_BOX = null;
-  // The best-ranked candidate WITH a captured frame -- not necessarily
-  // candidates[0], since an uncurated or freshly-added channel can have a
-  // top candidate that hasn't been probed yet at all.
-  const withFrame = (ch.candidates||[]).find(c => c.frame);
-  if(!withFrame){
+  // Every candidate WITH a captured frame is a valid reference picture, not
+  // just the best-ranked one -- the real case this is for: the top
+  // candidate happened to be probed at a moment the watermark had faded
+  // off (some channels do that periodically), and the picture needed to
+  // draw the box on is a genuinely different candidate's, not "whichever
+  // one probarr already assumed."
+  const withFrames = (ch.candidates||[]).filter(c => c.frame);
+  if(!withFrames.length){
     img.removeAttribute("src"); wrap.style.display = "none";
+    pickerField.style.display = "none";
     nopic.style.display = "block";
   }else{
     wrap.style.display = "inline-block"; nopic.style.display = "none";
-    img.src = withFrame.frame;
+    picker.innerHTML = withFrames.map((c,i) =>
+      '<option value="'+esc(c.id)+'">'+esc(c.name)+
+      ' (#'+c.rank+' ranked)'+(i===0?' — default':'')+'</option>').join("");
+    pickerField.style.display = withFrames.length > 1 ? "block" : "none";
+    picker.value = withFrames[0].id;
+    img.src = withFrames[0].frame;
   }
   document.getElementById("watermarkmodal").classList.add("on");
 }
+document.getElementById("wm-picker").addEventListener("change", (e) => {
+  const ch = DATA.channels.find(c=>c.key===current); if(!ch) return;
+  const c = (ch.candidates||[]).find(x=>x.id===e.target.value); if(!c) return;
+  document.getElementById("wm-img").src = c.frame;
+  // A new reference picture invalidates any in-progress (unsaved) drag --
+  // its fraction was computed against the PREVIOUS image's displayed size
+  // and would not mean the same thing here.
+  document.getElementById("wm-box").style.display = "none";
+  document.getElementById("wm-save").disabled = true;
+  WM_DRAG = null; WM_BOX = null;
+});
 function wmImgRect(){
   const img = document.getElementById("wm-img");
   const r = img.getBoundingClientRect();
