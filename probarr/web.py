@@ -2636,6 +2636,8 @@ class Handler(BaseHTTPRequestHandler):
         guides, so it costs nothing after the first lookup.
         """
         name = record.get("stream_name") or record.get("channel_key") or ""
+        channel_key = record.get("channel_key")
+        chsel = {}
         if store is not None:
             # The curated channel name wins over the raw stream's, same
             # reasoning as the EPG check panel: a rename is the operator
@@ -2643,12 +2645,37 @@ class Handler(BaseHTTPRequestHandler):
             # sources genuinely file a "+1" variant under a name that only
             # appears once the search term itself says "+1".
             entry = next((w for w in (store.read_wantlist().get("wanted") or [])
-                         if w.get("key") == record.get("channel_key")), None)
+                         if w.get("key") == channel_key), None)
             if entry and entry.get("name"):
                 name = entry["name"]
+            chsel = (store.read_selection() or {}).get(channel_key) or {}
         try:
             norm = Normalizer(aliases=aliases_mod.read(cls.root))
             at = datetime.datetime.now(datetime.timezone.utc)
+            # An explicit EPG source pick (Check EPG's "Use this", or a
+            # manually pinned exact guide entry) has to keep being honoured
+            # by every later capture, not just the live comparison panel --
+            # confirmed live, diagnosing a channel just after picking a
+            # different source still captured the OLD source's programme,
+            # because this used to only ever walk every saved source in
+            # list order and take whichever matched first, blind to the
+            # explicit pick sitting right there in selection.json. Same
+            # precedence _resolve_epg_overrides() already uses for the
+            # actual Dispatcharr push, so a diagnosed channel's guide panel
+            # agrees with what gets exported -- not a third opinion.
+            pref = chsel.get("epg_source")
+            if pref:
+                src = epgsources_mod.get(cls.root, pref)
+                if src:
+                    g = epgcheck_mod._indexed_guide(src["url"], norm, cls.root)
+                    override_id = (chsel.get("epg_channel_id")
+                                  if chsel.get("epg_channel_source") == pref else None)
+                    cid = (override_id if override_id and override_id in g.display_names
+                          else g.resolve(record.get("tvg_id") or None, name, norm))
+                    if cid:
+                        now = g.now_playing(cid, at)
+                        if now:
+                            return now
             for src in epgsources_mod.list_all(cls.root):
                 g = epgcheck_mod.load_cached(src["url"], root=cls.root)
                 cid = g.build_name_index(norm).resolve(

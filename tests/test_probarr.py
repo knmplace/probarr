@@ -1562,6 +1562,68 @@ class TestEpgList(Temp):
         self.assertEqual(names, ["4Seven", "5Star"])
 
 
+class TestExpectedNowHonoursExplicitEpgSource(Temp):
+    """Real bug report: after explicitly picking a different EPG source for
+    a channel in Check EPG, diagnosing that channel still captured the OLD
+    source's programme as `expected`. Root cause -- _expected_now() only
+    ever walked every saved source in list order and took whichever matched
+    first, blind to the channel's own selection.json pick. Everywhere else
+    an explicit epg_source is honoured (the live Check EPG panel, the
+    actual Dispatcharr push via _resolve_epg_overrides()); this is the one
+    place that silently wasn't.
+    """
+
+    def _guide(self, name, channel_name, programme_title):
+        import datetime
+        xml = os.path.join(self.root, name + ".xml")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        start = (now - datetime.timedelta(minutes=30)).strftime("%Y%m%d%H%M%S +0000")
+        stop = (now + datetime.timedelta(minutes=30)).strftime("%Y%m%d%H%M%S +0000")
+        body = (f'<channel id="c1"><display-name>{channel_name}</display-name></channel>'
+               f'<programme channel="c1" start="{start}" stop="{stop}">'
+               f'<title>{programme_title}</title></programme>')
+        with open(xml, "w", encoding="utf-8") as f:
+            f.write(f'<?xml version="1.0"?><tv>{body}</tv>')
+        from probarr import epgsources
+        epgsources.save(self.root, name, "file://" + xml)
+
+    def _record(self):
+        return {"channel_key": "NATGEO", "stream_name": "National Geographic",
+                "tvg_id": ""}
+
+    def test_falls_back_to_the_first_saved_source_with_no_explicit_pick(self):
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+        web_mod.Handler.root = self.root
+        self._guide("aaa-old", "National Geographic", "Old Programme")
+        self._guide("zzz-new", "National Geographic", "New Programme")
+        store = RunStore(self.root, "run1")
+        got = web_mod.Handler._expected_now(self._record(), store)
+        self.assertEqual(got["title"], "Old Programme")
+
+    def test_an_explicitly_picked_source_wins_even_when_listed_second(self):
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+        web_mod.Handler.root = self.root
+        self._guide("aaa-old", "National Geographic", "Old Programme")
+        self._guide("zzz-new", "National Geographic", "New Programme")
+        store = RunStore(self.root, "run1")
+        store.write_selection({"NATGEO": {"epg_source": "zzz-new"}})
+        got = web_mod.Handler._expected_now(self._record(), store)
+        self.assertEqual(got["title"], "New Programme")
+
+    def test_falls_back_when_the_picked_source_does_not_match_this_channel(self):
+        from probarr import web as web_mod
+        from probarr.store import RunStore
+        web_mod.Handler.root = self.root
+        self._guide("aaa-old", "National Geographic", "Old Programme")
+        self._guide("zzz-new", "Some Other Channel", "New Programme")
+        store = RunStore(self.root, "run1")
+        store.write_selection({"NATGEO": {"epg_source": "zzz-new"}})
+        got = web_mod.Handler._expected_now(self._record(), store)
+        self.assertEqual(got["title"], "Old Programme")
+
+
 class TestWatermarkCrop(Temp):
     """A channel nobody has marked a watermark area for must trigger NO
     work at all, not even a fast local one -- the whole point raised when
