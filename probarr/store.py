@@ -476,14 +476,41 @@ class RunStore:
         except ValueError:
             return None
 
+    def _write_wantlist_atomic(self, payload):
+        """Write the wantlist via a temp file and an atomic replace.
+
+        Every other write in this project already does this; these two were
+        the exception, and the wantlist is a bad one to lose. It holds each
+        channel's NUMBER and NAME, and _resolve_curated() skips any channel
+        without a number from every export -- so a half-written file does
+        not fail loudly, it silently drops channels from the M3U and from
+        the Dispatcharr push. Worse, read_wantlist() treats unparseable
+        JSON as an empty wantlist, so a truncated write reads back as
+        "nothing was wanted" rather than as an error.
+        """
+        tmp = self.wantlist_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.wantlist_path)
+        except BaseException:
+            # Leave the previous wantlist in place, and take the partial
+            # temp file with us rather than leaving litter behind.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
     def write_wantlist(self, wanted, missing):
         self._ensure_dirs()
-        with open(self.wantlist_path, "w", encoding="utf-8") as f:
-            json.dump({"wanted": [w.as_dict() for w in wanted],
-                       "missing": [w.as_dict() for w in missing]}, f, indent=2)
+        self._write_wantlist_atomic(
+            {"wanted": [w.as_dict() for w in wanted],
+             "missing": [w.as_dict() for w in missing]})
 
     def write_wantlist_raw(self, wanted, missing):
-        self._ensure_dirs()
         """Write an already-plain-dict wantlist.
 
         write_wantlist() takes the parser's objects and calls as_dict() on
@@ -492,8 +519,8 @@ class RunStore:
         way in that does not require reconstructing those objects just to
         immediately serialise them again.
         """
-        with open(self.wantlist_path, "w", encoding="utf-8") as f:
-            json.dump({"wanted": wanted, "missing": missing}, f, indent=2)
+        self._ensure_dirs()
+        self._write_wantlist_atomic({"wanted": wanted, "missing": missing})
 
     def read_wantlist(self):
         if not os.path.exists(self.wantlist_path):

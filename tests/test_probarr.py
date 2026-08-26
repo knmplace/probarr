@@ -2424,5 +2424,61 @@ class TestGuideParsePeakMemory(Temp):
         self.assertEqual(g.display_names["c1"], ["Chan 1"])
 
 
+class TestWantlistWriteIsAtomic(Temp):
+    """The wantlist is where a channel's NUMBER and NAME live, and
+    _resolve_curated() skips any channel with no number from every export.
+    A half-written wantlist therefore does not fail loudly -- it silently
+    drops channels from the M3U and from the Dispatcharr push, which is the
+    same silent-wrong-answer shape as the other bugs found in review.
+
+    Every other write in the project already goes through a temp file and
+    os.replace (21 call sites); these two were the exception.
+    """
+
+    def _crashing_dump(self, real):
+        calls = {"n": 0}
+
+        def dump(obj, f, **kw):
+            calls["n"] += 1
+            f.write('{"wanted": [{"key": "PARTIAL"')   # plausible, truncated
+            raise OSError("disk full")
+        return dump
+
+    def test_a_failed_write_leaves_the_previous_wantlist_intact(self):
+        import json as _json
+        from probarr.store import RunStore
+        store = RunStore(self.root, "run1", create=True)
+        store.write_wantlist_raw(
+            [{"key": "BBCONE", "number": 101, "name": "BBC One"}], [])
+        good = store.read_wantlist()
+        self.assertEqual(good["wanted"][0]["key"], "BBCONE")
+
+        with unittest.mock.patch.object(
+                _json, "dump", self._crashing_dump(_json.dump)):
+            with self.assertRaises(OSError):
+                store.write_wantlist_raw(
+                    [{"key": "BBCTWO", "number": 102, "name": "BBC Two"}], [])
+
+        # The old wantlist must still be readable and complete -- not
+        # truncated, not empty, not half of the new one.
+        after = store.read_wantlist()
+        self.assertEqual(after, good,
+                         "a crashed write corrupted the previous wantlist")
+
+    def test_a_successful_write_still_replaces_it(self):
+        from probarr.store import RunStore
+        store = RunStore(self.root, "run1", create=True)
+        store.write_wantlist_raw([{"key": "A", "number": 1, "name": "A"}], [])
+        store.write_wantlist_raw([{"key": "B", "number": 2, "name": "B"}], [])
+        self.assertEqual([w["key"] for w in store.read_wantlist()["wanted"]], ["B"])
+
+    def test_no_temp_file_is_left_behind(self):
+        from probarr.store import RunStore
+        store = RunStore(self.root, "run1", create=True)
+        store.write_wantlist_raw([{"key": "A", "number": 1, "name": "A"}], [])
+        leftovers = [f for f in os.listdir(store.dir) if f.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+
 if __name__ == "__main__":
     unittest.main()
