@@ -154,9 +154,28 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _redirect(self, location):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
         if path == "/":
+            # The runs list used to live here; it moved to /runs (still on
+            # the Runs nav tab) so "/" itself can go straight to the thing
+            # actually being worked on -- Curate for whichever run is most
+            # recent. RunStore.latest() is the same "newest first" ordering
+            # already used everywhere else a run needs picking without the
+            # user naming one; new runs sort first because they're named
+            # from a timestamp, same convention as the old list here.
+            latest = RunStore.latest(self.root)
+            if latest:
+                return self._redirect(
+                    f"/run/{urllib.parse.quote(latest.run_id)}/curate")
+            return self._redirect("/runs")
+        if path == "/runs":
             return self._index()
         if path == "/settings":
             return self._send(pages.settings_page())

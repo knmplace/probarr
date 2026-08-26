@@ -133,7 +133,9 @@ def plan(client, channels, group_name=None, default_group_name="probarr",
     existing = client.channels()
     by_number = {c["channel_number"]: c for c in existing
                  if c.get("channel_number") is not None}
-    logo_by_url = client.logo_map()
+    logos = client.logos()
+    logo_by_url = {l["url"]: l["id"] for l in logos}
+    logo_names = {l["id"]: l.get("name") or l["url"] for l in logos}
     groups_by_name = {g.get("name", "").strip().lower(): g["id"] for g in client.groups()}
     group_names = {g["id"]: g.get("name") for g in client.groups()}
 
@@ -158,13 +160,28 @@ def plan(client, channels, group_name=None, default_group_name="probarr",
             if target_group_id is None:
                 group_names[f"new:{wanted}"] = wanted
                 target_group_id = f"new:{wanted}"
+        # Same "new:<key>" sentinel convention as the group resolution just
+        # above -- plan() must never actually create the Logo row (previewing
+        # would become as consequential as pushing), but a URL with no
+        # matching row yet is still a REAL pending change push() will make,
+        # not nothing. Without this sentinel, a channel whose only difference
+        # was a freshly-picked logo (an EPG source's icon, a tv-logo/tv-logos
+        # search result -- neither ever auto-imported as a Dispatcharr Logo)
+        # silently reported as "no change" here right up until the moment
+        # push() actually created it.
         logo_id = logo_by_url.get(logo_url) if logo_url else None
+        if logo_url and logo_id is None:
+            logo_names[f"new:{logo_url}"] = "(new logo)"
+            logo_id = f"new:{logo_url}"
         kind, changes, _ = _decide(existing_ch, name, stream_ids,
                                    target_group_id, logo_id, epg_data_id)
         for c in changes:
             if c["field"] == "group":
                 c["from_name"] = group_names.get(c["from"])
                 c["to_name"] = group_names.get(c["to"], str(c["to"]))
+            elif c["field"] == "logo":
+                c["from_name"] = logo_names.get(c["from"], "(none)")
+                c["to_name"] = logo_names.get(c["to"], str(c["to"]))
         actions.append({"number": number, "name": name, "kind": kind,
                        "changes": changes})
 
@@ -239,9 +256,25 @@ def push(client, channels, group_name=None, default_group_name="probarr",
             _group_ids[name] = gid
         return _group_ids[name]
 
+    # Same lazy-create-once-per-push shape as group_id_for() above, for the
+    # same reason: most URLs already have a Logo row (the M3U's own
+    # tvg-logo, auto-imported by Dispatcharr's own M3U ingestion) and never
+    # need this to do anything but a dict lookup. Only a URL from somewhere
+    # ELSE Dispatcharr never saw -- a saved EPG source's own icon, a
+    # tv-logo/tv-logos search pick -- actually reaches get_or_create_logo().
+    _logo_ids = {}
+    def logo_id_for(url, name):
+        if url not in _logo_ids:
+            lid = logo_by_url.get(url)
+            if lid is None:
+                lid = client.get_or_create_logo(name, url)
+                log(f"logo '{name}' (id {lid})")
+            _logo_ids[url] = lid
+        return _logo_ids[url]
+
     existing = client.channels()
     by_number = {c["channel_number"]: c for c in existing if c.get("channel_number") is not None}
-    logo_by_url = client.logo_map()
+    logo_by_url = {l["url"]: l["id"] for l in client.logos()}
 
     created, updated, errors, changed_ids = 0, 0, [], []
     # Channels a curator explicitly picked an EPG source for (see epg_data_id
@@ -277,7 +310,7 @@ def push(client, channels, group_name=None, default_group_name="probarr",
                 target_group_id = existing_ch.get("channel_group_id")
             else:
                 target_group_id = group_id_for(group_name or default_group_name)
-            logo_id = logo_by_url.get(logo_url) if logo_url else None
+            logo_id = logo_id_for(logo_url, name) if logo_url else None
 
             # Same _decide() the preview used -- a plan shown to the operator
             # and the push that follows it are computed by one implementation,

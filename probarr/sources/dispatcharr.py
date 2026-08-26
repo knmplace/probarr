@@ -14,7 +14,11 @@ Two behaviours of its API are load-bearing and easy to get wrong:
 2. Creating or updating a channel via the API does NOT link a logo, even
    though Dispatcharr has already imported a Logo object for the tvg-logo URL
    it saw in the M3U. `logo_id` has to be resolved and set explicitly or every
-   channel silently ends up with no icon.
+   channel silently ends up with no icon. Worse, that auto-import only ever
+   happens for a URL Dispatcharr saw itself while ingesting an M3U -- a URL
+   from anywhere else (a saved EPG source's own icon, a tv-logo/tv-logos
+   search pick) has no Logo row at ALL, so even the lookup finds nothing.
+   get_or_create_logo() below is the create half of that fix.
 
 3. Django's own permission flags are not sufficient for write access.
    Dispatcharr layers a separate `user_level` field (0-10) on top, checked by
@@ -258,9 +262,43 @@ class Dispatcharr:
         """{group id: name} -- channels carry the id, people read the name."""
         return {g["id"]: g.get("name", "") for g in self.groups()}
 
-    def logo_map(self):
-        """{logo url: logo id} -- required to set logo_id explicitly."""
-        return {l["url"]: l["id"] for l in self.paged("/api/channels/logos/")}
+    def logos(self):
+        """Every Logo Dispatcharr already knows about, full rows -- id, name,
+        url. Fetched fresh (not cached on self) since dispatcharr_export.py
+        calls this once per plan()/push() and then builds whatever url->id
+        or id->name maps it needs from the result.
+        """
+        return self.paged("/api/channels/logos/")
+
+    def get_or_create_logo(self, name, url):
+        """Logo id for `url`, creating a Logo row if none exists for it yet.
+
+        Point 2 above (creating/updating a channel never links a logo) is
+        only half the story: Dispatcharr ALSO only auto-creates a Logo row
+        for a URL it saw itself while ingesting an M3U. A URL from anywhere
+        else -- a saved EPG source's own <icon>, a tv-logo/tv-logos search
+        pick -- has no Logo row at all, so logos() never finds it and a
+        channel silently ends up with no icon, exactly like an
+        unlinked M3U logo would. This is the create half get_or_create_group()
+        already does for groups, applied to the same problem for logos.
+        """
+        for l in self.logos():
+            if l.get("url") == url:
+                return l["id"]
+        try:
+            created = self.api("POST", "/api/channels/logos/",
+                               {"name": name, "url": url})
+            return created["id"]
+        except Exception:
+            # Dispatcharr enforces a unique URL on Logo and 400s a duplicate
+            # create -- possible if something else (another push, a
+            # concurrent request) created this exact URL between the lookup
+            # above and this POST. Re-checking turns that race into a lookup
+            # instead of a failed push.
+            for l in self.logos():
+                if l.get("url") == url:
+                    return l["id"]
+            raise
 
     def groups(self):
         return self.paged("/api/channels/groups/")

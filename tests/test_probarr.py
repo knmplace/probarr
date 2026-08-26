@@ -1356,6 +1356,141 @@ class TestExpand(unittest.TestCase):
         self.assertEqual(rows[1][2], "FALLBACK: Ch")
 
 
+class FakeDispatcharrClient:
+    """Just enough of sources/dispatcharr.py's Dispatcharr to drive plan()
+    and push() without a real server -- an in-memory Logo/Group/Channel
+    table plus the handful of methods dispatcharr_export.py actually calls.
+    """
+
+    def __init__(self, existing_channels=None, existing_logos=None,
+                existing_groups=None):
+        self._channels = list(existing_channels or [])
+        self._logos = list(existing_logos or [])
+        self._groups = list(existing_groups or [])
+        self._next_id = 1000
+        self.created_logos = []   # (name, url) actually POSTed, in order
+
+    def _id(self):
+        self._next_id += 1
+        return self._next_id
+
+    def channels(self):
+        return self._channels
+
+    def logos(self):
+        return self._logos
+
+    def groups(self):
+        return self._groups
+
+    def get_or_create_group(self, name):
+        for g in self._groups:
+            if g.get("name", "").strip().lower() == name.strip().lower():
+                return g["id"]
+        gid = self._id()
+        self._groups.append({"id": gid, "name": name})
+        return gid
+
+    def get_or_create_logo(self, name, url):
+        for l in self._logos:
+            if l.get("url") == url:
+                return l["id"]
+        lid = self._id()
+        self._logos.append({"id": lid, "name": name, "url": url})
+        self.created_logos.append((name, url))
+        return lid
+
+    def create_channel(self, payload):
+        ch = {**payload, "id": self._id()}
+        self._channels.append(ch)
+        return ch
+
+    def update_channel(self, channel_id, payload):
+        for c in self._channels:
+            if c["id"] == channel_id:
+                c.update(payload)
+                return c
+        raise KeyError(channel_id)
+
+    def match_epg(self, channel_ids):
+        pass
+
+
+class TestDispatcharrLogoPush(unittest.TestCase):
+    """The bug behind the user's own suspicion: a logo picked from
+    anywhere OTHER than the M3U's own tvg-logo (a saved EPG source's icon,
+    a tv-logo/tv-logos search result) was never actually reaching
+    Dispatcharr, because Dispatcharr only auto-creates a Logo row for a URL
+    it saw itself while ingesting an M3U -- logo_by_url.get(url) silently
+    returned None for anything else, and a plain `if logo_id:` guard meant
+    the channel payload just never carried a logo_id at all. No error,
+    no plan diff, nothing -- exactly the kind of silent miss that's hard
+    to notice without checking Dispatcharr itself.
+    """
+
+    def _channel(self, url="https://raw.githubusercontent.com/tv-logo/"
+                            "tv-logos/main/countries/united-kingdom/"
+                            "bbc-one-uk.png"):
+        return {"number": 101, "name": "BBC One",
+                "primary": {"stream_id": 1}, "fallback": None,
+                "logo_url": url}
+
+    def test_push_creates_a_missing_logo_row_and_links_it(self):
+        from probarr.dispatcharr_export import push
+        client = FakeDispatcharrClient()
+        result = push(client, [self._channel()], default_group_name="probarr")
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(len(client.created_logos), 1)
+        self.assertEqual(client.created_logos[0][1],
+                         "https://raw.githubusercontent.com/tv-logo/tv-logos/"
+                         "main/countries/united-kingdom/bbc-one-uk.png")
+        new_ch = client._channels[0]
+        self.assertIsNotNone(new_ch.get("logo_id"))
+        linked_logo = next(l for l in client._logos
+                           if l["id"] == new_ch["logo_id"])
+        self.assertEqual(linked_logo["url"], self._channel()["logo_url"])
+
+    def test_push_does_not_recreate_a_logo_that_already_exists(self):
+        from probarr.dispatcharr_export import push
+        url = self._channel()["logo_url"]
+        client = FakeDispatcharrClient(
+            existing_logos=[{"id": 5, "name": "BBC One", "url": url}])
+        push(client, [self._channel()], default_group_name="probarr")
+        self.assertEqual(client.created_logos, [])
+        self.assertEqual(client._channels[0]["logo_id"], 5)
+
+    def test_plan_reports_a_pending_logo_change_for_an_unmatched_url_without_creating_it(self):
+        from probarr.dispatcharr_export import plan
+        url = self._channel()["logo_url"]
+        existing_ch = {"id": 7, "channel_number": 101, "name": "BBC One",
+                      "streams": [1], "channel_group_id": 9, "logo_id": None}
+        client = FakeDispatcharrClient(
+            existing_channels=[existing_ch],
+            existing_groups=[{"id": 9, "name": "probarr"}])
+        result = plan(client, [self._channel(url)], default_group_name="probarr")
+        # The whole point of plan(): describe what push WOULD do without
+        # doing it -- so nothing on the fake client's Logo table should
+        # have moved.
+        self.assertEqual(client._logos, [])
+        action = next(a for a in result["actions"] if a["number"] == 101)
+        self.assertEqual(action["kind"], "update")
+        logo_change = next(c for c in action["changes"] if c["field"] == "logo")
+        self.assertEqual(logo_change["to_name"], "(new logo)")
+
+    def test_plan_reports_unchanged_when_the_logo_already_matches(self):
+        from probarr.dispatcharr_export import plan
+        url = self._channel()["logo_url"]
+        existing_ch = {"id": 7, "channel_number": 101, "name": "BBC One",
+                      "streams": [1], "channel_group_id": 9, "logo_id": 5}
+        client = FakeDispatcharrClient(
+            existing_channels=[existing_ch],
+            existing_logos=[{"id": 5, "name": "BBC One", "url": url}],
+            existing_groups=[{"id": 9, "name": "probarr"}])
+        result = plan(client, [self._channel(url)], default_group_name="probarr")
+        action = next(a for a in result["actions"] if a["number"] == 101)
+        self.assertEqual(action["kind"], "unchanged")
+
+
 class TestStore(Temp):
     def _store(self):
         s = RunStore(self.root, "run1")
@@ -1855,6 +1990,46 @@ class TestPageTemplates(unittest.TestCase):
         for name, html in self._pages().items():
             self.assertEqual(html.count("<script>"), html.count("</script>"),
                              f"{name} has an unbalanced script tag")
+
+
+class TestIndexRedirect(Temp):
+    """"/" is a landing pad, not a page of its own -- it should drop you
+    straight into whatever you were last working on (Curate for the newest
+    run) rather than an intermediate list you have to click through every
+    time. The list itself moved to /runs, still reachable from the Runs
+    nav tab, for the times you actually want to browse or delete a run.
+    """
+
+    def _handler(self):
+        from probarr import web as web_mod
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        sent = []
+        h.send_response = lambda code: sent.append(["status", code])
+        h.send_header = lambda k, v: sent.append([k, v])
+        h.end_headers = lambda: None
+        return h, sent
+
+    def test_redirects_to_the_newest_runs_curate_page(self):
+        from probarr.store import RunStore
+        RunStore(self.root, "20260101-000000").write_meta({})
+        RunStore(self.root, "20260825-000000").write_meta({})
+        h, sent = self._handler()
+        h.path = "/"
+        h.do_GET()
+        status = next(v for k, v in sent if k == "status")
+        location = next(v for k, v in sent if k == "Location")
+        self.assertEqual(status, 302)
+        self.assertEqual(location, "/run/20260825-000000/curate")
+
+    def test_with_no_runs_at_all_redirects_to_the_runs_list(self):
+        h, sent = self._handler()
+        h.path = "/"
+        h.do_GET()
+        status = next(v for k, v in sent if k == "status")
+        location = next(v for k, v in sent if k == "Location")
+        self.assertEqual(status, 302)
+        self.assertEqual(location, "/runs")
 
 
 class TestLogos(Temp):

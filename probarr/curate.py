@@ -26,6 +26,21 @@ aside{width:320px;flex:none;border-right:1px solid var(--line);background:var(--
 aside .tools{padding:9px 10px;border-bottom:1px solid var(--line);display:flex;
   flex-direction:column;gap:7px}
 aside .tools input[type=search]{width:100%}
+.searchrow{display:flex;gap:6px;align-items:center}
+.searchrow input[type=search]{flex:1;min-width:0}
+.addmenu-wrap{position:relative;flex:none}
+.iconbtn{width:29px;height:29px;padding:0;font-size:16px;line-height:1;
+  display:flex;align-items:center;justify-content:center}
+.addmenu{display:none;position:absolute;top:calc(100% + 4px);right:0;z-index:20;
+  background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius);
+  box-shadow:0 6px 18px rgba(0,0,0,.35);padding:5px;min-width:200px;
+  flex-direction:column;gap:3px}
+.addmenu.on{display:flex}
+.addmenu button{width:100%;text-align:left;font-size:12px;padding:7px 9px;
+  background:transparent;border:1px solid transparent}
+.addmenu button:hover{background:var(--panel);border-color:var(--line)}
+.toolrow{display:flex;gap:7px}
+.toolrow button{flex:1}
 .chips{display:flex;gap:4px;flex-wrap:wrap}
 .chip{font-size:11px;padding:3px 8px;border:1px solid var(--line);border-radius:11px;
   cursor:pointer;color:var(--dim);background:var(--panel);user-select:none}
@@ -45,10 +60,6 @@ aside .tools input[type=search]{width:100%}
 .dot{width:8px;height:8px;border-radius:50%;flex:none}
 .dot.ok{background:var(--ok)}.dot.review{background:var(--warn)}
 .dot.bad{background:var(--bad)}.dot.off{background:var(--faint)}
-.dotlegend{display:flex;gap:11px;flex-wrap:wrap;font-size:11px;color:var(--faint);
-  padding:2px 2px 0}
-.dotlegend span{display:flex;align-items:center;gap:4px}
-.dotlegend .dot{width:7px;height:7px}
 .chan .cnt{color:var(--faint);font-size:11px;font-variant-numeric:tabular-nums}
 main.detail{flex:1;overflow-y:auto;min-height:0;padding:14px 16px 20px}
 .dhead{margin-bottom:12px}
@@ -362,22 +373,25 @@ __TOPBAR__
 <div class="wrap">
   <aside>
     <div class="tools">
-      <input type="search" id="q" placeholder="Find a channel&hellip;">
-      <button id="addchannels" style="font-size:12px;padding:5px 8px">+ Add from provider</button>
-      <button id="importdispatch" style="font-size:12px;padding:5px 8px"
-        title="Read the channels that already exist in Dispatcharr into this run, and probe the provider's alternatives for each.">&darr; Import from Dispatcharr</button>
-      <button id="opengroups" style="font-size:12px;padding:5px 8px"
-        title="See every group and what is in it, drag channels between groups, or drop one channel on another to swap their numbers.">Groups</button>
-      <div class="chips" id="chips"></div>
-      <button id="diagfiltered" style="font-size:12px;padding:5px 8px;margin:6px 0"
-        title="Re-scan every candidate for the channels currently shown by this filter/search &mdash; pick which ones before it starts, same as the nightly re-verify but on demand and on a subset.">
-        Diagnose these (<span id="diagfilteredcount">0</span>)</button>
-      <div class="dotlegend" title="What the coloured dot on each channel means">
-        <span><i class="dot ok"></i>clean</span>
-        <span><i class="dot review"></i>needs a look</span>
-        <span><i class="dot bad"></i>no usable stream</span>
-        <span><i class="dot off"></i>excluded</span>
+      <div class="searchrow">
+        <input type="search" id="q" placeholder="Find a channel&hellip;">
+        <div class="addmenu-wrap">
+          <button id="addmenubtn" class="iconbtn" title="Add channels">+</button>
+          <div class="addmenu" id="addmenu">
+            <button id="addchannels">+ Add from provider</button>
+            <button id="importdispatch"
+              title="Read the channels that already exist in Dispatcharr into this run, and probe the provider's alternatives for each.">&darr; Import from Dispatcharr</button>
+          </div>
+        </div>
       </div>
+      <div class="toolrow">
+        <button id="opengroups" style="font-size:12px;padding:5px 8px"
+          title="See every group and what is in it, drag channels between groups, or drop one channel on another to swap their numbers.">Groups</button>
+        <button id="diagfiltered" style="font-size:12px;padding:5px 8px"
+          title="Re-scan every candidate for the channels currently shown by this filter/search &mdash; pick which ones before it starts, same as the nightly re-verify but on demand and on a subset.">
+          Diagnose these (<span id="diagfilteredcount">0</span>)</button>
+      </div>
+      <div class="chips" id="chips"></div>
     </div>
     <div class="chanlist" id="chanlist"></div>
   </aside>
@@ -942,6 +956,8 @@ function renderChips(){
 // every filter/search keystroke, so it's deliberately just the two cheap,
 // already-in-memory sources. A channel with neither shows no thumbnail
 // rather than a broken-image icon.
+const STATE_LABEL = {ok: "clean", review: "needs a look",
+  bad: "no usable stream", off: "excluded"};
 function listLogo(ch){
   const sel = SEL[ch.key] || {};
   return sel.logo_override || (ch.candidates||[]).map(c=>c.logo).find(Boolean) || "";
@@ -950,9 +966,10 @@ function renderList(){
   const list=visible();
   document.getElementById("chanlist").innerHTML = list.length ? list.map(ch=>{
     const logoUrl = listLogo(ch);
+    const st = state(ch);
     return '<div class="chan'+(current===ch.key?' sel':'')+(ch.missing?' missing':'')+
     (MARKED.has(ch.key)?' marked':'')+'" data-k="'+esc(ch.key)+'">'+
-      '<span class="dot '+state(ch)+'"></span>'+
+      '<span class="dot '+st+'" title="'+esc(STATE_LABEL[st]||st)+'"></span>'+
       '<span class="num">'+(ch.number!=null?ch.number:"")+'</span>'+
       (logoUrl ? '<img class="chlogo" src="'+esc(logoUrl)+'" alt="" loading="lazy">'
                : '<span class="chlogo chlogo-empty"></span>')+
@@ -1900,7 +1917,10 @@ document.getElementById("imp-all").addEventListener("click", ()=>{
 document.getElementById("imp-none").addEventListener("click", ()=>{
   IMPPICK.clear(); renderImport();
 });
-document.getElementById("importdispatch").addEventListener("click", openImport);
+document.getElementById("importdispatch").addEventListener("click", ()=>{
+  document.getElementById("addmenu").classList.remove("on");
+  openImport();
+});
 document.getElementById("imp-probe").addEventListener("change", ()=>{
   if(IMPFOUND.length) document.getElementById("imp-plan").click();
 });
@@ -2186,7 +2206,22 @@ document.getElementById("grpacc").addEventListener("click", e => {
   }
 });
 
-document.getElementById("addchannels").addEventListener("click", openCatalog);
+document.getElementById("addmenubtn").addEventListener("click", (e)=>{
+  e.stopPropagation();
+  document.getElementById("addmenu").classList.toggle("on");
+});
+document.addEventListener("click", (e)=>{
+  const menu = document.getElementById("addmenu");
+  if(menu.classList.contains("on") && !menu.contains(e.target)
+     && e.target.id !== "addmenubtn") menu.classList.remove("on");
+});
+document.addEventListener("keydown", (e)=>{
+  if(e.key === "Escape") document.getElementById("addmenu").classList.remove("on");
+});
+document.getElementById("addchannels").addEventListener("click", ()=>{
+  document.getElementById("addmenu").classList.remove("on");
+  openCatalog();
+});
 document.getElementById("cat-close").addEventListener("click", ()=>
   document.getElementById("catmodal").classList.remove("on"));
 document.getElementById("cat-q").addEventListener("input", ()=>{
@@ -3506,8 +3541,8 @@ document.getElementById("dm-preview").addEventListener("click", async () => {
           (a.number!=null?a.number+' ':'')+esc(a.name)+'</span><span class="pchg">'+
           (a.kind==="unchanged" ? "no change" :
            a.kind==="create" ? "will be created" :
-           a.changes.map(ch => ch.field==="group"
-              ? 'group <code>'+esc(ch.from_name||ch.from)+'</code> \u2192 <code>'+
+           a.changes.map(ch => (ch.field==="group"||ch.field==="logo")
+              ? esc(ch.field)+' <code>'+esc(ch.from_name||ch.from)+'</code> \u2192 <code>'+
                 esc(ch.to_name||ch.to)+'</code>'
               : esc(ch.field)+' <code>'+esc(JSON.stringify(ch.from))+'</code> \u2192 <code>'+
                 esc(JSON.stringify(ch.to))+'</code>').join(", "))+

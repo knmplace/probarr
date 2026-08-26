@@ -119,7 +119,7 @@ _NAV_ITEMS = [("providers", "/providers", "Providers"),
               ("browse", "/browse", "Channels"),
               ("wantlists", "/wantlists", "Wantlists"),
               ("lineups", "/lineups", "Lineups"),
-              ("runs", "/", "Runs"),
+              ("runs", "/runs", "Runs"),
               ("settings", "/settings", "Settings")]
 
 
