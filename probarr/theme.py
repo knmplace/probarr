@@ -9,7 +9,7 @@ from . import __version__
 CSS = """
 :root{
   --bg:#1f2224; --bg2:#262b2e; --panel:#2a2f33; --panel2:#31373b;
-  --line:#3a4247; --text:#e8eaec; --dim:#9aa4ab; --faint:#6b757c;
+  --line:#3a4247; --text:#e8eaec; --dim:#b7c0c6; --faint:#8a949b;
   --accent:#35c5f0; --accent2:#1e9fc7;
   --ok:#27c24c; --warn:#f0ad4e; --bad:#f05050; --dup:#a774d9;
   --radius:4px;
