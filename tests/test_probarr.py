@@ -3436,6 +3436,8 @@ class TestSettingsPostIsAlsoRedacted(Temp):
         h._json_body = lambda: (
             {"source": "xtream://user:sup3rs3cret@host:8080"}, False)
         h.path = "/api/settings"
+        h.headers = {"Host": "192.168.1.243:7799",
+                     "Origin": "http://192.168.1.243:7799"}
         return h, sent
 
     def test_the_save_response_does_not_echo_the_raw_credential(self):
