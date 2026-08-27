@@ -1675,6 +1675,7 @@ __TOPBAR__
       <div>
         <div class="brtools">
           <input type="search" id="q" placeholder="Filter channels&hellip;">
+          <select id="countryfilter" style="display:none;max-width:160px"></select>
           <select id="catfilter" style="display:none;max-width:200px"></select>
           <button id="selall">Select visible</button>
           <button id="selnone">Select none</button>
@@ -1745,6 +1746,14 @@ $("load").addEventListener("click", async ()=>{
     CHANNELS = d.channels; CHECKED.clear();
     $("loadmsg").textContent = CHANNELS.length+" channels found in "+d.total_streams+" streams";
     $("results").style.display = "block";
+    if(d.countries && d.countries.length){
+      $("countryfilter").style.display = "inline-block";
+      $("countryfilter").innerHTML = '<option value="">All countries</option>' +
+        d.countries.map(c => '<option value="'+esc(c)+'">'+esc(c)+'</option>').join("");
+    } else {
+      $("countryfilter").style.display = "none";
+      $("countryfilter").innerHTML = "";
+    }
     if(d.groups && d.groups.length){
       $("catfilter").style.display = "inline-block";
       $("catfilter").innerHTML = '<option value="">All categories</option>' +
@@ -1757,16 +1766,20 @@ $("load").addEventListener("click", async ()=>{
   }catch(e){ $("loadmsg").textContent = "request failed"; }
   finally{ $("load").disabled = false; }
 });
+$("countryfilter").addEventListener("change", renderList);
 $("catfilter").addEventListener("change", renderList);
 
 function visible(){
   const q = $("q").value.trim().toLowerCase();
+  const country = $("countryfilter").value;
   const cat = $("catfilter").value;
-  let list = CHANNELS;
-  if(cat) list = list.filter(c => c.group === cat);
-  if(!q) return list;
-  return list.filter(c => c.name.toLowerCase().includes(q) ||
-    c.examples.some(e => e.toLowerCase().includes(q)));
+  return CHANNELS.filter(c => {
+    if(country && c.country !== country) return false;
+    if(cat && c.group !== cat) return false;
+    if(q && !(c.name.toLowerCase().includes(q) ||
+      c.examples.some(e => e.toLowerCase().includes(q)))) return false;
+    return true;
+  });
 }
 
 function renderList(){
@@ -1797,6 +1810,8 @@ document.addEventListener("click", e=>{
   if(tog){ tog.closest(".brrow").classList.toggle("expanded"); return; }
 });
 $("q").addEventListener("input", renderList);
+$("countryfilter").addEventListener("change", renderList);
+$("catfilter").addEventListener("change", renderList);
 $("selall").addEventListener("click", ()=>{ visible().forEach(c=>CHECKED.add(c.key)); renderList(); });
 $("selnone").addEventListener("click", ()=>{ visible().forEach(c=>CHECKED.delete(c.key)); renderList(); });
 

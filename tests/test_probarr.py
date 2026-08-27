@@ -26,7 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from probarr import aliases as aliases_mod
 from probarr import curate, epg, lineups, pages, providers, settings, wantlist as wl
-from probarr.normalize import Normalizer, group_candidates, declared_quality_rank
+from probarr.normalize import (Normalizer, group_candidates,
+                               declared_quality_rank, split_group_title)
 from probarr.rank import rank
 from probarr.sources import m3u
 from probarr.sources.base import Stream
@@ -86,6 +87,108 @@ class TestNormalize(unittest.TestCase):
                                           "UK: ITV1"])]
         pools = group_candidates(streams, self.n)
         self.assertEqual(sorted(len(v) for v in pools.values()), [1, 2])
+
+
+class TestSplitGroupTitle(unittest.TestCase):
+    """Country + category split for Browse Channels' two-level filter.
+
+    Real providers spell the country/category boundary differently --
+    Dispatcharr's own convention pipes them ("UK | Amazon Events"), other
+    panels use a colon or bare space, and the country token itself is
+    sometimes a 2-letter code (US, CA) and sometimes 3-letter (USA, CAN).
+    split_group_title() must handle all of these without per-provider
+    configuration, reusing the same tag/separator machinery region_of()
+    and group_of() already rely on.
+    """
+
+    def test_pipe_delimited_country_prefix(self):
+        self.assertEqual(split_group_title("UK | Amazon Events"),
+                         ("UK", "Amazon Events"))
+
+    def test_colon_delimited_country_prefix(self):
+        self.assertEqual(split_group_title("US: Sports"),
+                         ("US", "Sports"))
+
+    def test_space_delimited_country_prefix(self):
+        self.assertEqual(split_group_title("US Sports HD"),
+                         ("US", "Sports HD"))
+
+    def test_three_letter_country_code(self):
+        self.assertEqual(split_group_title("USA | Sports"),
+                         ("US", "Sports"))
+        self.assertEqual(split_group_title("CAN Locals"),
+                         ("CA", "Locals"))
+
+    def test_full_country_name(self):
+        self.assertEqual(split_group_title("Canada Amazon Prime Linear"),
+                         ("CA", "Amazon Prime Linear"))
+
+    def test_no_country_marker_falls_back_to_whole_string_as_category(self):
+        self.assertEqual(split_group_title("Movies"), (None, "Movies"))
+        self.assertEqual(split_group_title(""), (None, ""))
+        self.assertEqual(split_group_title(None), (None, ""))
+
+    def test_ukraine_is_not_mistaken_for_uk(self):
+        # Same class of false positive region_of()/group_of() already guard
+        # against -- a group-title starting with "Ukraine" must not be
+        # split as country=UK, category="raine ...".
+        country, category = split_group_title("Ukraine Sports")
+        self.assertNotEqual(country, "UK")
+        self.assertEqual(category, "Ukraine Sports")
+
+
+class TestBrowseCountryCategory(Temp):
+    """Browse Channels' /api/browse must expose country/category for every
+    provider type, not just Dispatcharr -- Xtream and M3U sources already
+    carry a `group` on each Stream, it just wasn't being split or surfaced.
+    """
+
+    def _handler(self, streams):
+        from probarr import web as web_mod
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        sent = []
+        h._send = lambda body, ctype="application/json", code=200: sent.append(body)
+        patches = [
+            unittest.mock.patch.object(
+                web_mod.providers_mod, "get",
+                lambda root, name: {"spec": "m3u://x", "scheme": "m3u"}),
+            unittest.mock.patch.object(web_mod, "load_source", lambda spec: streams),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return h, sent
+
+    def test_xtream_style_streams_get_country_and_category(self):
+        streams = [
+            Stream(id="1", name="BBC One", url="http://x/1", group="UK | General"),
+            Stream(id="2", name="BBC Two", url="http://x/2", group="UK | General"),
+            Stream(id="3", name="ESPN", url="http://x/3", group="US: Sports"),
+        ]
+        h, sent = self._handler(streams)
+        h._browse({"provider": "prov1"})
+
+        d = json.loads(sent[0])
+        self.assertIn("countries", d)
+        self.assertIn("groups", d)
+        self.assertEqual(sorted(d["countries"]), ["UK", "US"])
+        self.assertEqual(sorted(d["groups"]), ["General", "Sports"])
+        by_name = {c["name"]: c for c in d["channels"]}
+        self.assertEqual(by_name["ESPN"]["country"], "US")
+        self.assertEqual(by_name["ESPN"]["group"], "Sports")
+
+    def test_streams_without_a_recognizable_country_still_get_a_category(self):
+        streams = [Stream(id="1", name="Movie Channel", url="http://x/1",
+                          group="Movies")]
+        h, sent = self._handler(streams)
+        h._browse({"provider": "prov1"})
+
+        d = json.loads(sent[0])
+        self.assertEqual(d["countries"], [])
+        self.assertEqual(d["groups"], ["Movies"])
+        self.assertEqual(d["channels"][0]["country"], "")
+        self.assertEqual(d["channels"][0]["group"], "Movies")
 
 
 class TestWantlist(unittest.TestCase):
@@ -2352,17 +2455,29 @@ class TestBackup(Temp):
     def test_refuses_a_path_traversal_member(self):
         import io
         import tarfile
+        import uuid
         from probarr import backup as backup_mod
+        # A marker name unique to this run, NOT a real system path. The
+        # original version escaped to "../../etc/passwd" and then asserted
+        # that path did not exist -- which on Linux resolves to the real
+        # /etc/passwd and is therefore always true-ish in the wrong
+        # direction: the assertion failed on any host whose temp dir sits
+        # two levels down (/tmp/xxx), and "passed" on macOS only because
+        # its temp dirs are nested deeper. It never tested the property it
+        # claimed. Caught by CI the first time the suite was made blocking.
+        marker = f"probarr-traversal-{uuid.uuid4().hex}.txt"
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            info = tarfile.TarInfo(name="../../etc/passwd")
+            info = tarfile.TarInfo(name=f"../../{marker}")
             payload = b"pwned"
             info.size = len(payload)
             tar.addfile(info, io.BytesIO(payload))
         with self.assertRaises(ValueError):
             backup_mod.import_tar(self.root, buf.getvalue())
-        # And nothing was written outside root as a side effect of the attempt.
-        self.assertFalse(os.path.exists(os.path.join(self.root, "..", "..", "etc", "passwd")))
+        # Nothing written outside root as a side effect of the attempt.
+        escaped = os.path.abspath(os.path.join(self.root, "..", "..", marker))
+        self.assertFalse(os.path.exists(escaped),
+                         f"a traversal member escaped to {escaped}")
 
 
 class TestAliases(Temp):
@@ -3302,6 +3417,54 @@ class TestRunKwargsWiresStrictRegion(Temp):
         kwargs = h._run_kwargs({"source": "http://x/playlist.m3u",
                                 "regions": "US"})
         self.assertFalse(kwargs["strict_region"])
+
+
+class TestSettingsPostIsAlsoRedacted(Temp):
+    """PR #1 redacted GET /api/settings but not the POST response, so the
+    save round-trip still handed the raw credential back -- into the
+    response body, into any proxy log on that leg, and into the settings
+    field on screen until the next reload. The GET fix is only half of it
+    unless both directions agree.
+    """
+
+    def _handler(self):
+        from probarr import web as web_mod
+        web_mod.Handler.root = self.root
+        h = web_mod.Handler.__new__(web_mod.Handler)
+        sent = []
+        h._send = lambda body, ctype="text/plain", code=200: sent.append(body)
+        h._json_body = lambda: (
+            {"source": "xtream://user:sup3rs3cret@host:8080"}, False)
+        h.path = "/api/settings"
+        return h, sent
+
+    def test_the_save_response_does_not_echo_the_raw_credential(self):
+        import json as _json
+        h, sent = self._handler()
+        h.do_POST()
+        body = _json.loads(sent[0])
+        self.assertNotIn("sup3rs3cret", sent[0])
+        self.assertEqual(body["source"], "xtream://***:***@host:8080")
+
+    def test_the_real_credential_is_still_what_gets_stored(self):
+        from probarr import settings as settings_mod
+        h, _ = self._handler()
+        h.do_POST()
+        # Redaction is a display concern only -- the stored value must
+        # remain usable, or the next run cannot reach the provider.
+        self.assertEqual(settings_mod.read(self.root)["source"],
+                         "xtream://user:sup3rs3cret@host:8080")
+
+    def test_get_and_post_agree_on_what_they_show(self):
+        import json as _json
+        h, sent = self._handler()
+        h.do_POST()
+        post_body = _json.loads(sent[0])
+        h2, sent2 = self._handler()
+        h2.path = "/api/settings"
+        h2.do_GET()
+        get_body = _json.loads(sent2[0])
+        self.assertEqual(post_body["source"], get_body["source"])
 
 
 if __name__ == "__main__":

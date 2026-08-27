@@ -9,6 +9,7 @@ container needs no extra layer to run it.
 """
 import dataclasses
 import datetime
+from collections import Counter
 import hashlib
 import html
 import json
@@ -41,7 +42,8 @@ from .sources.base import Stream
 from .sources import dispatcharr as dispatcharr_mod
 from .sources.dispatcharr import client_from_spec, base_url_of
 from .store import RunStore, InvalidRunId
-from .normalize import Normalizer, group_candidates, declared_quality_rank
+from .normalize import (Normalizer, group_candidates, declared_quality_rank,
+                        split_group_title)
 from .probe import ProbeOptions, probe
 from .theme import CSS, topbar
 from .verify import annotate_placeholders
@@ -442,8 +444,17 @@ class Handler(BaseHTTPRequestHandler):
             body, sent = self._json_body()
             if sent:
                 return
-            return self._send(json.dumps(settings_mod.write(self.root, body)),
-                              "application/json")
+            # Redacted on the way OUT as well as in, or the save
+            # round-trip hands the credential straight back -- into the
+            # response body, into any proxy log on that leg, and into the
+            # field on screen until the next reload. The GET was fixed
+            # first (PR #1); this is the other half. The page's own save
+            # handler reads this response back into the field and into its
+            # as-loaded comparison value, so both directions agreeing is
+            # what stops an untouched field being saved over the secret.
+            return self._send(
+                json.dumps(settings_mod.redact(settings_mod.write(self.root, body))),
+                "application/json")
 
         if path == "/api/backup/import":
             if not self._same_origin():
@@ -2243,11 +2254,21 @@ class Handler(BaseHTTPRequestHandler):
             # "BBC One" rather than "UKFHD | BBC One HD [Multi-Audio]" -- and
             # so the most natural default label for the group.
             best = min(names, key=len)
+            # Most candidates in a pool share the same source group-title;
+            # take the most common non-empty one as the pool's group.
+            group_titles = [c.group for c in cands if getattr(c, "group", None)]
+            group_title = Counter(group_titles).most_common(1)[0][0] if group_titles else ""
+            country, category = split_group_title(group_title)
             channels.append({"key": key, "name": best, "count": len(cands),
-                            "examples": names[:6]})
+                            "examples": names[:6], "group": category,
+                            "country": country or ""})
         channels.sort(key=lambda c: c["name"].lower())
 
-        self._send(json.dumps({"channels": channels, "total_streams": len(streams)}),
+        groups = sorted({c["group"] for c in channels if c["group"]})
+        countries = sorted({c["country"] for c in channels if c["country"]})
+
+        self._send(json.dumps({"channels": channels, "total_streams": len(streams),
+                               "groups": groups, "countries": countries}),
                    "application/json")
 
     def _browse_dispatcharr_active(self, prov):
