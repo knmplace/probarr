@@ -13,6 +13,7 @@ This module answers "what does each saved source say is on RIGHT NOW",
 checked live rather than only at probe time, across every source at once so
 a curator can pick the one that actually lines up with the picture.
 """
+import concurrent.futures
 import datetime
 import hashlib
 import json
@@ -252,12 +253,26 @@ def prewarm_all_sources(root, normalizer):
     parse (network hiccup, a rate-limited aggregator) must not stop the
     others from warming, and this must never raise into whatever caller
     triggered it.
+
+    Sources are warmed concurrently, not one after another -- each has its
+    own per-url lock (see _lock_for), so different sources never contend
+    with each other, only same-url callers do. A household with several
+    saved sources was seeing them parse+index in series (5-20s each, so
+    N sources meant N times that in a row) purely because this loop was
+    sequential, not because the work itself needed to be.
     """
-    for src in epgsources_mod.list_all(root):
-        try:
-            _indexed_guide(src["url"], normalizer, root)
-        except Exception:
-            pass
+    srcs = epgsources_mod.list_all(root)
+    if not srcs:
+        return
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(8, len(srcs))) as pool:
+        futs = [pool.submit(_indexed_guide, src["url"], normalizer, root)
+                for src in srcs]
+        for f in futs:
+            try:
+                f.result()
+            except Exception:
+                pass
 
 
 def search_source(root, source_name, query, normalizer, limit=25):
