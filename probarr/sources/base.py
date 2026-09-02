@@ -31,8 +31,8 @@ class Stream:
         """
         u = re.sub(r"(?i)([?&](?:username|password|user|pass|u|p|token|key)=)[^&]*",
                    r"\1***", self.url)
-        # Xtream path form: http://host:port/USERNAME/PASSWORD/12345.ts
-        u = re.sub(r"(?i)^(https?://[^/]+)/[^/]+/[^/]+/(\d+)", r"\1/***/***/\2", u)
+        # Xtream path form: http://host:port/live/USERNAME/PASSWORD/12345.ts
+        u = re.sub(r"(?i)^(https?://[^/]+/live)/[^/]+/[^/]+/(\d+)", r"\1/***/***/\2", u)
         return u
 
 
