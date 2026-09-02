@@ -19,7 +19,7 @@ ENV PYTHONUNBUFFERED=1 \
 VOLUME ["/config"]
 EXPOSE 7799
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD wget -qO- http://127.0.0.1:7799/ >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["python3", "-m", "probarr"]
