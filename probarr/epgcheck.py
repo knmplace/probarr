@@ -260,12 +260,22 @@ def prewarm_all_sources(root, normalizer):
     saved sources was seeing them parse+index in series (5-20s each, so
     N sources meant N times that in a row) purely because this loop was
     sequential, not because the work itself needed to be.
+
+    Capped at 4 workers regardless of source count or CPU count -- XMLTV
+    parsing is CPU-bound (ET.iterparse releases the GIL, so threads really
+    do run in parallel across cores here, not just during I/O waits), and
+    running one worker per core starves the server's own request-handling
+    thread of CPU right when the container is trying to pass its startup
+    health check. Confirmed live: an 8-core host with 8+ saved sources hit
+    100%+ CPU for the health check's whole 5s timeout and the container
+    was marked unhealthy. 4 keeps this fast (still far better than serial)
+    while leaving headroom for the process actually serving HTTP.
     """
     srcs = epgsources_mod.list_all(root)
     if not srcs:
         return
     with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(8, len(srcs))) as pool:
+            max_workers=min(4, len(srcs))) as pool:
         futs = [pool.submit(_indexed_guide, src["url"], normalizer, root)
                 for src in srcs]
         for f in futs:
