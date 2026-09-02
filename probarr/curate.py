@@ -3383,7 +3383,8 @@ function renderPushStatus(s){
       (d.pruned && d.pruned.length
         ? "\nremoved emptied group(s): "+d.pruned.join(", ") : "")+
       (d.same_instance ? "\n(reused existing streams -- same instance as the run's source)"
-                        : "\n(created new custom streams in the target)");
+                        : "\n(created new custom streams in the target)")+
+      (d.log && d.log.length ? "\n\n"+d.log.join("\n") : "");
     stopPushPoll();
     checkPending();
   } else if(s.state === "error"){

@@ -1390,16 +1390,41 @@ class TestGetOrCreateAccountForSource(unittest.TestCase):
         self.assertFalse(any(m == "POST" for m, *_ in calls))
 
     def test_skips_a_non_url_spec_entirely(self):
-        # dispatcharr:// and xtream:// specs have no server_url string a
-        # real M3U account could ever match verbatim -- no-op, not a guess.
+        # dispatcharr:// specs have no server_url string a real M3U account
+        # could ever match verbatim -- no-op, not a guess.
         client, calls, created = self._client([])
         self.assertIsNone(
             client.get_or_create_account_for_source("dispatcharr://u:p@host:9191",
                                                      "mydispatch"))
-        self.assertIsNone(
-            client.get_or_create_account_for_source("xtream://u:p@host:8080", "myx"))
         self.assertFalse(calls)
         self.assertFalse(created)
+
+    def test_creates_an_account_for_an_xtream_spec(self):
+        # xtream://user:pass@host:port is not itself a URL any Dispatcharr
+        # account's server_url could hold -- it must resolve to the same
+        # get.php playlist URL sources/xtream.py's own client would use.
+        client, calls, created = self._client([])
+        acct = client.get_or_create_account_for_source(
+            "xtream://myuser:myp%40ss@streamlive2.net:80", "myx")
+        self.assertEqual(acct["id"], 99)
+        self.assertEqual(
+            created[0]["server_url"],
+            "http://streamlive2.net:80/get.php?"
+            "username=myuser&password=myp%40ss&type=m3u_plus&output=ts")
+        self.assertEqual(created[0]["name"], "myx")
+
+    def test_reuses_an_existing_account_matching_the_resolved_xtream_url(self):
+        accounts = [{"id": 10, "name": "WARP",
+                     "server_url": "http://streamlive2.net:80/get.php?"
+                                   "username=myuser&password=mypass&"
+                                   "type=m3u_plus&output=ts",
+                     "max_streams": 3}]
+        client, calls, created = self._client(accounts)
+        acct = client.get_or_create_account_for_source(
+            "xtream://myuser:mypass@streamlive2.net:80", "WARP")
+        self.assertEqual(acct["id"], 10)
+        self.assertFalse(created)
+        self.assertFalse(any(m == "POST" for m, *_ in calls))
 
     def test_skips_an_empty_spec(self):
         client, calls, created = self._client([])
