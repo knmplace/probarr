@@ -481,6 +481,40 @@ class Dispatcharr:
             return
         self._tighten_max_streams(acct, limit, log, "shared 'custom' M3U account")
 
+    @staticmethod
+    def _resolve_playlist_url(spec):
+        """`spec` as the literal playlist URL a Dispatcharr M3U account's
+        server_url would hold, or None if `spec` has no such URL at all
+        (dispatcharr://, empty, etc).
+
+        Most sources already store `spec` as that URL verbatim
+        (http://.../playlist.m3u8). Xtream is the one common exception:
+        probarr stores it as `xtream://user:pass@host:port` (see
+        sources/xtream.py, the actual stream-reading client for this
+        scheme), never as a real URL -- so every caller comparing against or
+        creating a Dispatcharr server_url needs the same get.php-style URL a
+        person would type into Dispatcharr by hand for the same panel.
+        Built with the exact same scheme/host/port rules
+        sources/xtream.py's own `load()` uses, so an account created here
+        matches account matching done anywhere else in probarr.
+        """
+        if not spec:
+            return None
+        if spec.startswith(("http://", "https://")):
+            return spec
+        if spec.startswith(("xtream://", "xtreams://")):
+            u = urllib.parse.urlparse(spec)
+            scheme = "https" if u.scheme == "xtreams" else "http"
+            base = f"{scheme}://{u.hostname}" + (f":{u.port}" if u.port else "")
+            q = urllib.parse.urlencode({
+                "username": urllib.parse.unquote(u.username or ""),
+                "password": urllib.parse.unquote(u.password or ""),
+                "type": "m3u_plus",
+                "output": "ts",
+            })
+            return f"{base}/get.php?{q}"
+        return None
+
     def find_account_for_source(self, spec):
         """The real Dispatcharr M3U account whose server_url is `spec`, if
         Dispatcharr has one -- the account get_or_create_custom_stream()
@@ -503,11 +537,18 @@ class Dispatcharr:
         account's own `server_url: None` (the shared "custom" account has
         exactly that) purely by coincidence, and silently tighten the wrong
         account.
+
+        `spec` is resolved via `_resolve_playlist_url` first, so an
+        `xtream://user:pass@host:port` spec is compared against the same
+        get.php-style URL Dispatcharr's own server_url would hold for that
+        panel, not the bare `xtream://` string (which no account could ever
+        actually have).
         """
-        if not spec:
+        url = self._resolve_playlist_url(spec)
+        if not url:
             return None
         return next((a for a in self.api("GET", "/api/m3u/accounts/")
-                    if a.get("server_url") == spec), None)
+                    if a.get("server_url") == url), None)
 
     def enforce_provider_stream_limit(self, spec, limit, log=None):
         """Tighten (never loosen) THIS provider's own real M3U account's
@@ -547,12 +588,16 @@ class Dispatcharr:
         by-hand prerequisite (`BunnyCustom`'s server_url, corrected via a raw
         API call before any of this existed).
 
-        Only attempted for a plain M3U/Xtream playlist URL (`spec` starting
-        with http:// or https://) -- `dispatcharr://` and other non-URL specs
-        have no `server_url` string Dispatcharr could ever match verbatim, so
-        creating an account for one would just be a namespace with nothing to
-        parse. A no-op for those, same as find_account_for_source() already
-        is when nothing matches.
+        Only attempted for a plain M3U URL or an Xtream spec (`spec` starting
+        with http://, https://, xtream://, or xtreams://) -- `dispatcharr://`
+        and other non-URL specs have no `server_url` string Dispatcharr could
+        ever match verbatim, so creating an account for one would just be a
+        namespace with nothing to parse. A no-op for those, same as
+        find_account_for_source() already is when nothing matches. An
+        Xtream spec is resolved to its real get.php-style playlist URL via
+        `_resolve_playlist_url` first -- see that method's docstring --
+        since `xtream://user:pass@host:port` itself is not a URL any
+        Dispatcharr account's server_url could ever literally hold.
 
         Deliberately never given a URL-less "stub" server_url -- that shape
         was ruled out during scoping (see the design doc's "What's confirmed
@@ -580,14 +625,15 @@ class Dispatcharr:
         for a person, not something to guess at here.
         """
         log = log or (lambda msg: None)
-        if not spec or not spec.startswith(("http://", "https://")):
+        url = self._resolve_playlist_url(spec)
+        if not url:
             return None
         acct = self.find_account_for_source(spec)
         if acct:
             return acct
         try:
             created = self.api("POST", "/api/m3u/accounts/",
-                               {"name": name, "server_url": spec, "is_active": True})
+                               {"name": name, "server_url": url, "is_active": True})
         except http.HttpError as e:
             log(f"  could not create a Dispatcharr M3U account for "
                f"'{name}': {e}")
