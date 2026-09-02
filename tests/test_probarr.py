@@ -1401,23 +1401,25 @@ class TestGetOrCreateAccountForSource(unittest.TestCase):
 
     def test_creates_an_account_for_an_xtream_spec(self):
         # xtream://user:pass@host:port is not itself a URL any Dispatcharr
-        # account's server_url could hold -- it must resolve to the same
-        # get.php playlist URL sources/xtream.py's own client would use.
+        # account's server_url could hold -- it must resolve to the bare
+        # base URL a real Xtream Codes account uses, with credentials sent
+        # as separate account_type/username/password fields (confirmed live
+        # against Dispatcharr-245: a get.php-style server_url with embedded
+        # credentials creates a Standard account instead of Xtream Codes,
+        # and Dispatcharr never engages XC session handling for it).
         client, calls, created = self._client([])
         acct = client.get_or_create_account_for_source(
             "xtream://myuser:myp%40ss@streamlive2.net:80", "myx")
         self.assertEqual(acct["id"], 99)
-        self.assertEqual(
-            created[0]["server_url"],
-            "http://streamlive2.net:80/get.php?"
-            "username=myuser&password=myp%40ss&type=m3u_plus&output=ts")
+        self.assertEqual(created[0]["server_url"], "http://streamlive2.net:80")
+        self.assertEqual(created[0]["account_type"], "XC")
+        self.assertEqual(created[0]["username"], "myuser")
+        self.assertEqual(created[0]["password"], "myp@ss")
         self.assertEqual(created[0]["name"], "myx")
 
     def test_reuses_an_existing_account_matching_the_resolved_xtream_url(self):
         accounts = [{"id": 10, "name": "WARP",
-                     "server_url": "http://streamlive2.net:80/get.php?"
-                                   "username=myuser&password=mypass&"
-                                   "type=m3u_plus&output=ts",
+                     "server_url": "http://streamlive2.net:80",
                      "max_streams": 3}]
         client, calls, created = self._client(accounts)
         acct = client.get_or_create_account_for_source(

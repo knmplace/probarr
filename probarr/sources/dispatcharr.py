@@ -483,20 +483,29 @@ class Dispatcharr:
 
     @staticmethod
     def _resolve_playlist_url(spec):
-        """`spec` as the literal playlist URL a Dispatcharr M3U account's
-        server_url would hold, or None if `spec` has no such URL at all
-        (dispatcharr://, empty, etc).
+        """`spec` as the literal server_url a Dispatcharr M3U account would
+        hold for it, or None if `spec` has no such URL at all (dispatcharr://,
+        empty, etc).
 
         Most sources already store `spec` as that URL verbatim
         (http://.../playlist.m3u8). Xtream is the one common exception:
         probarr stores it as `xtream://user:pass@host:port` (see
         sources/xtream.py, the actual stream-reading client for this
-        scheme), never as a real URL -- so every caller comparing against or
-        creating a Dispatcharr server_url needs the same get.php-style URL a
-        person would type into Dispatcharr by hand for the same panel.
-        Built with the exact same scheme/host/port rules
-        sources/xtream.py's own `load()` uses, so an account created here
-        matches account matching done anywhere else in probarr.
+        scheme), never as a real URL. Confirmed live against a real XC
+        account (Dispatcharr-245): its server_url is the BARE base URL
+        (e.g. "http://host:port"), not a get.php playlist URL -- credentials
+        live in separate username/password fields instead (see
+        _resolve_xtream_credentials), and Dispatcharr does its own Xtream
+        Codes API login against that base URL rather than fetching a static
+        playlist. An earlier version of this method built a get.php URL
+        with embedded credentials to match the plain-M3U convention, which
+        DID create an account and DID list its streams, but Dispatcharr
+        silently treated it as a Standard (STD) account instead of Xtream
+        Codes (XC) -- streams played briefly then dropped into a
+        reconnect loop, because Dispatcharr's XC-specific session/connection
+        handling was never engaged. account_type/username/password (set by
+        get_or_create_account_for_source) are what actually select XC mode;
+        this method only ever returns the base URL used for matching.
         """
         if not spec:
             return None
@@ -505,15 +514,20 @@ class Dispatcharr:
         if spec.startswith(("xtream://", "xtreams://")):
             u = urllib.parse.urlparse(spec)
             scheme = "https" if u.scheme == "xtreams" else "http"
-            base = f"{scheme}://{u.hostname}" + (f":{u.port}" if u.port else "")
-            q = urllib.parse.urlencode({
-                "username": urllib.parse.unquote(u.username or ""),
-                "password": urllib.parse.unquote(u.password or ""),
-                "type": "m3u_plus",
-                "output": "ts",
-            })
-            return f"{base}/get.php?{q}"
+            return f"{scheme}://{u.hostname}" + (f":{u.port}" if u.port else "")
         return None
+
+    @staticmethod
+    def _resolve_xtream_credentials(spec):
+        """(username, password) for an `xtream://`/`xtreams://` spec, URL-
+        decoded the same way sources/xtream.py's own client decodes them, or
+        None if `spec` is not an Xtream spec at all.
+        """
+        if not spec or not spec.startswith(("xtream://", "xtreams://")):
+            return None
+        u = urllib.parse.urlparse(spec)
+        return (urllib.parse.unquote(u.username or ""),
+               urllib.parse.unquote(u.password or ""))
 
     def find_account_for_source(self, spec):
         """The real Dispatcharr M3U account whose server_url is `spec`, if
@@ -539,10 +553,11 @@ class Dispatcharr:
         account.
 
         `spec` is resolved via `_resolve_playlist_url` first, so an
-        `xtream://user:pass@host:port` spec is compared against the same
-        get.php-style URL Dispatcharr's own server_url would hold for that
-        panel, not the bare `xtream://` string (which no account could ever
-        actually have).
+        `xtream://user:pass@host:port` spec is compared against the bare
+        base URL Dispatcharr's own server_url holds for an XC account, not
+        the `xtream://` string itself (which no account could ever actually
+        have) nor a get.php-style playlist URL (which a real XC account's
+        server_url never is either -- see _resolve_playlist_url's docstring).
         """
         url = self._resolve_playlist_url(spec)
         if not url:
@@ -593,24 +608,32 @@ class Dispatcharr:
         and other non-URL specs have no `server_url` string Dispatcharr could
         ever match verbatim, so creating an account for one would just be a
         namespace with nothing to parse. A no-op for those, same as
-        find_account_for_source() already is when nothing matches. An
-        Xtream spec is resolved to its real get.php-style playlist URL via
-        `_resolve_playlist_url` first -- see that method's docstring --
-        since `xtream://user:pass@host:port` itself is not a URL any
-        Dispatcharr account's server_url could ever literally hold.
+        find_account_for_source() already is when nothing matches.
+
+        An Xtream spec is created as a real Xtream Codes (XC) account, not a
+        Standard (STD) one: `account_type: "XC"` plus separate `username`/
+        `password` fields, alongside the bare base URL `_resolve_playlist_url`
+        already resolves for matching. Confirmed live (probarr-oz2) that this
+        distinction is not cosmetic -- an earlier version of this method
+        omitted account_type/username/password and instead baked credentials
+        into a get.php-style playlist URL, matching the plain-M3U convention.
+        That DID create an account and DID list Dispatcharr streams from it,
+        but Dispatcharr defaulted it to STD, and STD accounts don't get
+        Dispatcharr's Xtream-specific session/reconnect handling -- playback
+        started then dropped into a repeating "Connection lost, reconnecting"
+        loop within seconds. account_type/username/password are what actually
+        select XC mode; server_url is only ever the bare base URL, same as
+        every other real XC account already in this Dispatcharr instance.
 
         Deliberately never given a URL-less "stub" server_url -- that shape
         was ruled out during scoping (see the design doc's "What's confirmed
         feasible" section): creating an M3U account triggers an immediate,
         one-time refresh attempt regardless of its periodic-refresh setting,
         and an empty server_url turns that into a user-visible "downloading
-        failed" notification the moment it's created. Passing `spec` itself
-        (always a real, working playlist URL here) means that first refresh
-        should succeed instead, though this specific path -- account
-        CREATION, as opposed to correcting an existing one's URL by hand --
-        has not itself been exercised against a live instance; confirm this
-        before relying on it against a Dispatcharr install that alerts on
-        M3U failures.
+        failed" notification the moment it's created. Passing a real base URL
+        (plus, for Xtream, the account_type/username/password that make
+        Dispatcharr log into it correctly) means that first refresh succeeds
+        instead -- confirmed live against Dispatcharr-245.
 
         Only ever CREATES, never renames or re-points an existing account:
         naming collisions and provider renames/credential rotation are
@@ -631,9 +654,13 @@ class Dispatcharr:
         acct = self.find_account_for_source(spec)
         if acct:
             return acct
+        body = {"name": name, "server_url": url, "is_active": True}
+        creds = self._resolve_xtream_credentials(spec)
+        if creds:
+            body["account_type"] = "XC"
+            body["username"], body["password"] = creds
         try:
-            created = self.api("POST", "/api/m3u/accounts/",
-                               {"name": name, "server_url": url, "is_active": True})
+            created = self.api("POST", "/api/m3u/accounts/", body)
         except http.HttpError as e:
             log(f"  could not create a Dispatcharr M3U account for "
                f"'{name}': {e}")
