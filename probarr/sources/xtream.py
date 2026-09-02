@@ -32,7 +32,7 @@ class Xtream:
             out.append(Stream(
                 id=f"xtream:{sid}",
                 name=s.get("name", ""),
-                url=f"{self.base}/{self.username}/{self.password}/{sid}.ts",
+                url=f"{self.base}/live/{self.username}/{self.password}/{sid}.ts",
                 group=cats.get(str(s.get("category_id")), ""),
                 logo=s.get("stream_icon") or "",
                 tvg_id=s.get("epg_channel_id") or "",
